@@ -108,8 +108,8 @@ jobs:
           '@.TrimStart()
           Replace-Once $genericTest $oldFlags $newFlags
 
-          $oldGate = '-VsInstall $VsInstall -Arch $Arch' + [Environment]::NewLine
-          $newGate = '-VsInstall $VsInstall -Arch $Arch -Compiler $Compiler -MsvcReason $MsvcReason' + [Environment]::NewLine
+          $oldGate = '-VsInstall $VsInstall -Arch $Arch' + [char]10
+          $newGate = '-VsInstall $VsInstall -Arch $Arch -Compiler $Compiler -MsvcReason $MsvcReason' + [char]10
           Replace-Once $buildUmd $oldGate $newGate 3
 
           Write-Host 'CI build gates now use the explicitly requested MSVC mode; no tests are disabled.'
