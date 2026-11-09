@@ -1,0 +1,70 @@
+name: BD-253 D3D9On12 bare-allocation build
+
+on:
+  push:
+    branches:
+      - try/d3d9on12-bare-allocation
+    paths:
+      - patches/NAGI_GDI1_shared_open_fix.patch
+      - .github/workflows/bd253-build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract-msvc:
+    name: Contract test (\${{ matrix.arch }})
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - name: Checkout overlay
+        uses: actions/checkout@v4
+
+      - name: Checkout exact upstream tester.37
+        uses: actions/checkout@v4
+        with:
+          repository: D-Ogi/amdgpu-wddm
+          ref: v0.7.216.109-tester.37
+          path: upstream
+          persist-credentials: false
+
+      - name: Verify and apply patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git -C upstream apply --check "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          git -C upstream apply "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          git -C upstream diff --check
+          git -C upstream diff --stat
+
+      - name: Initialize MSVC (\${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: \${{ matrix.arch }}
+
+      - name: Compile contract test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location upstream
+          try {
+            cl.exe /nologo /std:c++17 /EHsc /W4 /WX /O2 /I driver\contract /I driver\kmd driver\contract\test\shared-surface-test.cpp /Fe:shared-surface-test.exe
+            if ($LASTEXITCODE -ne 0) { throw "MSVC compile failed: $LASTEXITCODE" }
+            .\shared-surface-test.exe
+            if ($LASTEXITCODE -ne 0) { throw "Contract tests failed: $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Upload compiled contract-test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-surface-test-\${{ matrix.arch }}
+          path: upstream/shared-surface-test.exe
+          if-no-files-found: error
