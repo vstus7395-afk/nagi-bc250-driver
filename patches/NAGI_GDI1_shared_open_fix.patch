@@ -2,7 +2,7 @@ diff --git a/driver/contract/bc250_shared_surface.h b/driver/contract/bc250_shar
 index 88c57a8bbe01eb44810f1dd5e197246c9b8819ef..f0307896b75d1b673311c0db312e2918d1775727 100644
 --- a/driver/contract/bc250_shared_surface.h
 +++ b/driver/contract/bc250_shared_surface.h
-@@ -342,6 +342,82 @@ static __inline int Bc250SharedSurfaceDecodeWhy(const void *ResourceData, unsign
+@@ -342,6 +342,88 @@ static __inline int Bc250SharedSurfaceDecodeWhy(const void *ResourceData, unsign
                                            Why);
  }
  
