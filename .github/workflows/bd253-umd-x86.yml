@@ -96,7 +96,7 @@ jobs:
 
           $oldFlags = @'
               $flags=@('/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/MT','/DNOMINMAX','/external:W0',
-                      "/external:I$wdk","/external:I$wdk/../shared")
+                  "/external:I$wdk","/external:I$wdk/../shared")
               if($DdiInclude){$flags=@("/external:I$DdiInclude")+$flags}
               $flags=ConvertTo-Bc250ClangFlags $flags $Arch @($repo)
           '@
