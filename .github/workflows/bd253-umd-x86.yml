@@ -201,7 +201,14 @@ jobs:
           $dll = Join-Path $out 'amdgpu_wddm_d3d12.dll'
           if (-not (Test-Path -LiteralPath $dll)) { throw '32-bit D3D12 UMD DLL was not produced' }
           Get-FileHash -Algorithm SHA256 $dll | Format-List
-          dumpbin.exe /headers $dll | Select-String -Pattern 'machine|14C|8664'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe is missing; cannot locate the installed MSVC tools' }
+          $vsInstall = & $vswhere -latest -products '*' -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vsInstall) { throw 'Could not locate the Visual Studio installation' }
+          $dumpbin = Get-ChildItem -Path (Join-Path $vsInstall 'VC\Tools\MSVC\*\bin\Hostx64\x86\dumpbin.exe') -File |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'The x86-capable dumpbin.exe was not found in the installed MSVC toolchain' }
+          & $dumpbin.FullName /headers $dll | Select-String -Pattern 'machine|14C|8664'
           if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the built UMD DLL' }
 
       - name: Upload 32-bit D3D12 UMD test build
