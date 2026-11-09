@@ -25,7 +25,8 @@ jobs:
         with:
           path: |
             toolchain/nuget
-          key: windows-2022-bd253-tester37-sdk-wdk-llvm-23.1.4-v1
+          key: windows-2022-bd253-tester37-sdk-wdk-msvc-v1
+          save-always: true
 
       - name: Checkout exact upstream tester.37
         uses: actions/checkout@v4
