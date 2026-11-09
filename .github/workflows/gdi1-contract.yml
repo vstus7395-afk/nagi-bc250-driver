@@ -1,0 +1,52 @@
+name: GDI1 shared-surface contract
+
+on:
+  push:
+    paths:
+      - "patches/**"
+      - ".github/workflows/gdi1-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msvc:
+    runs-on: windows-2022
+    steps:
+      - name: Check out this work repository
+        uses: actions/checkout@v4
+
+      - name: Check out the exact Nagi source release
+        uses: actions/checkout@v4
+        with:
+          repository: D-Ogi/amdgpu-wddm
+          ref: v0.7.216.109-tester.37
+          path: upstream
+          persist-credentials: false
+
+      - name: Apply the experimental patch
+        shell: pwsh
+        run: |
+          git -C upstream apply --check "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          git -C upstream apply "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+
+      - name: Compile and run shared-surface contract tests (x64 MSVC)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build and execute contract test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location upstream
+          try {
+            cl.exe /nologo /std:c++17 /EHsc /W4 /WX /O2 /Fe:shared-surface-test.exe driver/contract/test/shared-surface-test.cpp
+            if ($LASTEXITCODE -ne 0) { throw "MSVC compile failed: $LASTEXITCODE" }
+            .\shared-surface-test.exe
+            if ($LASTEXITCODE -ne 0) { throw "Shared-surface contract tests failed: $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
