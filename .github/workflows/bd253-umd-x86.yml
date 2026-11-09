@@ -88,6 +88,12 @@ jobs:
           $buildEngine = Join-Path $env:GITHUB_WORKSPACE 'upstream\tools\build\build-engine-ddi.ps1'
           $genericTest = Join-Path $env:GITHUB_WORKSPACE 'upstream\tools\build\build-generic-signature-test.ps1'
           $buildUmd = Join-Path $env:GITHUB_WORKSPACE 'upstream\tools\build\build-umd-d3d12.ps1'
+          $crlf = ([char]13).ToString() + ([char]10).ToString()
+          $lf = ([char]10).ToString()
+          foreach ($scriptPath in @($buildEngine, $genericTest, $buildUmd)) {
+            $scriptText = [IO.File]::ReadAllText($scriptPath).Replace($crlf, $lf)
+            [IO.File]::WriteAllText($scriptPath, $scriptText)
+          }
 
           Replace-Once $buildEngine '-VsInstall $VsInstall -Arch $Arch -DdiInclude $DdiInclude' '-VsInstall $VsInstall -Arch $Arch -DdiInclude $DdiInclude -Compiler $Compiler -MsvcReason $MsvcReason'
 
