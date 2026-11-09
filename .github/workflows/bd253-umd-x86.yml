@@ -164,6 +164,15 @@ jobs:
 
           $dll = Join-Path $out 'amdgpu_wddm_d3d12.dll'
           if (-not (Test-Path -LiteralPath $dll)) { throw '32-bit D3D12 UMD DLL was not produced' }
+
+          # Reject the earlier CI-only MSVC artifact: release tester.37 uses pinned clang-cl.
+          $compilerRecord = Get-Content -LiteralPath (Join-Path $out 'engine-ddi\compiler.json') -Raw | ConvertFrom-Json
+          if ($compilerRecord.compiler -ne 'clang-cl') { throw "Wrong UMD compiler: $($compilerRecord.compiler); expected clang-cl" }
+          $dllBytes = (Get-Item -LiteralPath $dll).Length
+          if ($dllBytes -lt 2MB) { throw "Suspiciously small x86 UMD: $dllBytes bytes; refusing to package" }
+          $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($dll)
+          if ($versionInfo.ProductVersion -notlike '0.7.216.109*') { throw "Missing/wrong tester.37 version resource: $($versionInfo.ProductVersion)" }
+          Write-Host "Verified release compiler=$($compilerRecord.compiler), bytes=$dllBytes, ProductVersion=$($versionInfo.ProductVersion)"
           Get-FileHash -Algorithm SHA256 $dll | Format-List
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe is missing; cannot locate the installed MSVC tools' }
