@@ -123,10 +123,21 @@ jobs:
             Invoke-WebRequest -Uri $url -OutFile $archive
             $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($hash -ne '1a3f2f998e230b5791cc4e2bfe11a1f7c07fe42c96ff44f227c9db0bedfaf091') { throw "LLVM archive SHA256 mismatch: $hash" }
+            # Windows tar on the hosted runner has no zstd helper; use the preinstalled 7-Zip
+            # to unpack the .zst layer and then the inner .tar layer.
+            $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+            if (-not (Test-Path -LiteralPath $sevenZip)) {
+              $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+            }
+            $zstStage = Join-Path $env:RUNNER_TEMP 'llvm-zst-stage'
             $extract = Join-Path $env:RUNNER_TEMP 'llvm-extract'
-            New-Item -ItemType Directory -Force $extract | Out-Null
-            & tar.exe -xf $archive -C $extract
-            if ($LASTEXITCODE -ne 0) { throw "LLVM archive extraction failed: $LASTEXITCODE" }
+            New-Item -ItemType Directory -Force $zstStage, $extract | Out-Null
+            & $sevenZip x $archive "-o$zstStage" -y
+            if ($LASTEXITCODE -ne 0) { throw "LLVM zstd decompression failed: $LASTEXITCODE" }
+            $tarFile = Get-ChildItem -LiteralPath $zstStage -Filter '*.tar' -File | Select-Object -First 1
+            if (-not $tarFile) { throw 'LLVM .zst archive did not produce an inner .tar file' }
+            & $sevenZip x $tarFile.FullName "-o$extract" -y
+            if ($LASTEXITCODE -ne 0) { throw "LLVM tar extraction failed: $LASTEXITCODE" }
             $folder = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
             if (-not $folder) { throw 'LLVM archive has no top-level directory' }
             Move-Item -LiteralPath $folder.FullName -Destination $llvmRoot
