@@ -116,6 +116,8 @@ jobs:
           $vulkan = Join-Path $root 'Vulkan-Headers\include'
 
           $header = Join-Path $engine 'bc250_vkd3d_engine.h'
+          $headerText = [IO.File]::ReadAllText($header).Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($header, $headerText)
           $headerHash = (Get-FileHash -Algorithm SHA256 $header).Hash.ToLowerInvariant()
           if ($headerHash -ne 'a87e47a9bf6327b784165ce0fb2046347e2d135c0716dd8c69823a5e108f2928') {
             throw "Pinned engine ABI header hash mismatch: $headerHash"
