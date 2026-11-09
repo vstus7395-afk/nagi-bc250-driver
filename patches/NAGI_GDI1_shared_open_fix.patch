@@ -1,0 +1,147 @@
+--- a/driver/contract/bc250_shared_surface.h
++++ b/driver/contract/bc250_shared_surface.h
+@@ -342,6 +342,78 @@
+                                           Why);
+ }
+ 
++/* A GDI standard shared texture has no E26R resource record. Its KMD allocation record is instead
++ * LB7A v1 followed by the 16-byte GDI1 trailer. Do not treat every missing E26R as a texture: admit
++ * only GDISURFACETYPE_TEXTURE (type 1), whose allocation geometry and composed format can be
++ * independently reconstructed from the KMD's own GDI layout rule. The resulting D3D12 description
++ * is deliberately copy-only (no bind flags); callers must not infer render-target or shader usage. */
++#define BC250_SHARED_SURFACE_WHY_GDI_RECORD "GDI allocation record"
++static __inline int Bc250SharedSurfaceDecodeGdi(const void *AllocationData, unsigned int AllocationBytes,
++                                                BC250_SHARED_SURFACE *Out, const char **Why)
++{
++    BC250_GDI_PRIVATE gdi;
++    const AMDGPU_WDDM_SURFACE_FORMAT *row;
++    BC250_GDI_ALLOCATION_POLICY policy;
++    unsigned long expected_pitch = 0;
++    unsigned long long expected_size = 0;
++    unsigned long long aligned_width, aligned_height;
++    BC250_SHARED_SURFACE out;
++    const char *why = BC250_SHARED_SURFACE_WHY_ARGUMENTS;
++    int status = BC250_SHARED_SURFACE_MALFORMED;
++    unsigned int i;
++    const unsigned char *src;
++    unsigned char *dst;
++    if (!Out || !AllocationData) goto done;
++    why = BC250_SHARED_SURFACE_WHY_ALLOCATION_LENGTH;
++    if (AllocationBytes != (unsigned int)sizeof(gdi)) goto done;
++    src = (const unsigned char *)AllocationData;
++    dst = (unsigned char *)&gdi;
++    for (i = 0; i < (unsigned int)sizeof(gdi); ++i) dst[i] = src[i];
++    why = BC250_SHARED_SURFACE_WHY_ALLOCATION_RECORD;
++    if (gdi.Surface.Magic != BC250_WDDM_ALLOCATION_PRIVATE_MAGIC || gdi.Surface.Version != 1 ||
++        gdi.Magic != BC250_GDI_PRIVATE_MAGIC || gdi.Flags || gdi.Reserved) goto done;
++    /* Type 1 is the only GDI allocation class whose KMD contract describes a shareable texture.
++     * Staging, shadow, primary and unknown GDI types are not texture-open fallbacks. */
++    why = BC250_SHARED_SURFACE_WHY_POLICY;
++    if (gdi.Type != 1 || !WddmGdiAllocationPolicy(gdi.Type, 0, 0, &policy)) goto done;
++    why = BC250_SHARED_SURFACE_WHY_EXTENT;
++    if (!gdi.Surface.Width || !gdi.Surface.Height ||
++        gdi.Surface.Width > BC250_SHARED_MAX_EDGE || gdi.Surface.Height > BC250_SHARED_MAX_EDGE) goto done;
++    why = BC250_SHARED_SURFACE_WHY_FORMAT;
++    row = amdgpu_wddm_surface_admit(amdgpu_wddm_surface_format_by_d3dddi((unsigned int)gdi.Surface.Format),
++                                    AMDGPU_WDDM_SURFACE_COMPOSED);
++    if (!row || !row->dxgi) goto done;
++    why = BC250_SHARED_SURFACE_WHY_ALLOCATION_GEOMETRY;
++    /* Type 1's KMD layout is DcnPrimaryPitch(width) by height rounded to four rows. Keep this
++     * arithmetic here instead of calling the KMD's DcnSharedTextureLayout: this contract is also
++     * linked into the user-mode driver, which must not acquire a dependency on KMD object code. */
++    why = BC250_SHARED_SURFACE_WHY_ALLOCATION_GEOMETRY;
++    if (row->bytes_per_pixel != 4 || !Bc250SharedSurfaceGeometry(&gdi.Surface, row->bytes_per_pixel)) goto done;
++    aligned_width = ((unsigned long long)gdi.Surface.Width + 63ull) & ~63ull;
++    aligned_height = ((unsigned long long)gdi.Surface.Height + 3ull) & ~3ull;
++    if (!aligned_width || aligned_width > 0xffffffffull / 4ull) goto done;
++    expected_pitch = (unsigned long)(aligned_width * 4ull);
++    expected_size = (unsigned long long)expected_pitch * aligned_height;
++    if (gdi.Surface.Pitch != expected_pitch || gdi.Surface.Size != expected_size) goto done;
++    out.Width = gdi.Surface.Width;
++    out.Height = gdi.Surface.Height;
++    out.Pitch = gdi.Surface.Pitch;
++    out.DxgiFormat = row->dxgi;
++    out.D3dDdiFormat = gdi.Surface.Format;
++    out.BindFlags = 0;
++    out.BytesPerPixel = row->bytes_per_pixel;
++    out.Size = gdi.Surface.Size;
++    out.MiscFlags = 0;
++    out.Shared = 1;
++    out.Access = 0;
++    *Out = out;
++    why = BC250_SHARED_SURFACE_WHY_GDI_RECORD;
++    status = BC250_SHARED_SURFACE_OK;
++done:
++    if (Why) *Why = why;
++    return status;
++}
++
+ static __inline int Bc250SharedSurfaceDecode(const void *ResourceData, unsigned int ResourceBytes,
+                                              const void *AllocationData, unsigned int AllocationBytes,
+                                              BC250_SHARED_SURFACE *Out)
+--- a/driver/umd/d3d12/engine-ddi/resources.cpp
++++ b/driver/umd/d3d12/engine-ddi/resources.cpp
+@@ -969,8 +969,24 @@
+     // 2026-10-06). The strings are the header's literals, so the pointer outlives this call.
+     *why = BC250_SHARED_SURFACE_WHY_ARGUMENTS;
+     BC250_SHARED_SURFACE shared{};
+-    switch (Bc250SharedSurfaceDecodeWhy(args->pPrivateDriverData, args->PrivateDriverDataSize,
+-                                        first.pPrivateDriverData, first.PrivateDriverDataSize, &shared, why)) {
++    int decoded = Bc250SharedSurfaceDecodeWhy(args->pPrivateDriverData, args->PrivateDriverDataSize,
++                                               first.pPrivateDriverData, first.PrivateDriverDataSize, &shared, why);
++    bool gdi_fallback = false;
++    if (decoded != BC250_SHARED_SURFACE_OK && args->PrivateDriverDataSize == 0) {
++        // GDI standard shared textures have no E26R resource blob. Admit only the narrowly defined GDI1
++        // texture form; the decoder validates its KMD-authored geometry and format before we build a
++        // copy-only D3D12 texture description. No staging/primary or guessed bind flags are accepted.
++        decoded = Bc250SharedSurfaceDecodeGdi(first.pPrivateDriverData, first.PrivateDriverDataSize, &shared, why);
++        gdi_fallback = decoded == BC250_SHARED_SURFACE_OK;
++    }
++    if (gdi_fallback) {
++        static std::atomic<uint64_t> gdi_open_count{0};
++        if (gdi_open_count.fetch_add(1, std::memory_order_relaxed) == 0)
++            log_line("shared open: admitted GDI1 type-1 texture as copy-only: %lux%lu pitch %lu DXGI %lu size %llu",
++                     shared.Width, shared.Height, shared.Pitch, shared.DxgiFormat,
++                     static_cast<unsigned long long>(shared.Size));
++    }
++    switch (decoded) {
+     case BC250_SHARED_SURFACE_OK:
+         break;
+     case BC250_SHARED_SURFACE_FORMAT:
+--- a/driver/contract/test/shared-surface-test.cpp
++++ b/driver/contract/test/shared-surface-test.cpp
+@@ -104,6 +104,34 @@
+     // The version this driver writes is the version byte of the record below, not a number beside it.
+     check(BC250_SURFACE_RESOURCE_TEXTURE_VERSION == kResource[4], "the texture record is version 3");
+ 
++    // A standard GDI shared texture has no E26R resource blob. Its 48-byte GDI1 allocation record
++    // is admitted only for type 1, with a format and geometry the KMD's GDI layout rule reproduces.
++    {
++        BC250_GDI_PRIVATE gdi{};
++        BC250_SHARED_SURFACE out{};
++        const char* why = nullptr;
++        std::memcpy(&gdi.Surface, kAllocation, sizeof(kAllocation));
++        gdi.Magic = BC250_GDI_PRIVATE_MAGIC;
++        gdi.Type = 1;
++        const unsigned long pitch = static_cast<unsigned long>(((gdi.Surface.Width + 63ul) & ~63ul) * 4ul);
++        const unsigned long long size = static_cast<unsigned long long>(pitch) *
++                                        ((gdi.Surface.Height + 3ul) & ~3ul);
++        gdi.Surface.Pitch = pitch;
++        gdi.Surface.Size = size;
++        check(Bc250SharedSurfaceDecodeGdi(&gdi, sizeof(gdi), &out, &why) == BC250_SHARED_SURFACE_OK &&
++                  out.Width == gdi.Surface.Width && out.Height == gdi.Surface.Height &&
++                  out.DxgiFormat == AMDGPU_WDDM_DXGI_B8G8R8A8_UNORM && out.Shared == 1 && out.BindFlags == 0 &&
++                  is(why, BC250_SHARED_SURFACE_WHY_GDI_RECORD),
++              "GDI1: type 1 shared BGRA texture decodes as copy-only");
++        gdi.Type = 2;
++        check(Bc250SharedSurfaceDecodeGdi(&gdi, sizeof(gdi), &out, &why) != BC250_SHARED_SURFACE_OK,
++              "GDI1: staging type is not admitted as a shared texture");
++        gdi.Type = 1;
++        gdi.Flags = 1;
++        check(Bc250SharedSurfaceDecodeGdi(&gdi, sizeof(gdi), &out, &why) != BC250_SHARED_SURFACE_OK,
++              "GDI1: nonzero flags are refused");
++    }
++
+     // The encoder writes the lab's bytes, byte for byte.
+     {
+         const BC250_SHARED_SURFACE s = lab_surface();
