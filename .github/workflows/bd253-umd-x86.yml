@@ -170,6 +170,15 @@ jobs:
           $engine = Join-Path $root 'vkd3d-proton\libs\ddi'
           $vulkan = Join-Path $root 'Vulkan-Headers\include'
 
+          # The pinned ABI hash is over LF-normalized bytes; checkout on Windows may produce CRLF.
+          $header = Join-Path $engine 'bc250_vkd3d_engine.h'
+          $headerText = [IO.File]::ReadAllText($header).Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($header, $headerText)
+          $headerHash = (Get-FileHash -Algorithm SHA256 $header).Hash.ToLowerInvariant()
+          if ($headerHash -ne 'a87e47a9bf6327b784165ce0fb2046347e2d135c0716dd8c69823a5e108f2928') {
+            throw "Pinned engine ABI header hash mismatch after LF normalization: $headerHash"
+          }
+
           pwsh -NoProfile -File upstream\tools\build\build-umd-d3d12.ps1 -OutputDir $out -MesaSource $mesa -VulkanInclude $vulkan -EngineInclude $engine -Arch x86 -Compiler clang-cl -Flavour release -Version '0.7.216.109-tester.37' -DdiInclude $wdk -ApiInclude $api
           if ($LASTEXITCODE -ne 0) { throw "32-bit D3D12 UMD build failed: $LASTEXITCODE" }
 
