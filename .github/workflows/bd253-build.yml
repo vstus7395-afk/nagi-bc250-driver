@@ -37,9 +37,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git -C upstream apply --check "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
-          git -C upstream apply "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          git -C upstream -c core.whitespace=cr-at-eol apply --recount --check "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          if ($LASTEXITCODE -ne 0) { throw "Patch check failed: $LASTEXITCODE" }
+          git -C upstream -c core.whitespace=cr-at-eol apply --recount "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          if ($LASTEXITCODE -ne 0) { throw "Patch application failed: $LASTEXITCODE" }
           git -C upstream diff --check
+          if ($LASTEXITCODE -ne 0) { throw "Whitespace check failed: $LASTEXITCODE" }
+          $changed = @(git -C upstream diff --name-only)
+          Write-Host ($changed -join "`n")
+          if ($changed.Count -ne 3) { throw "Expected exactly 3 patched source files, got $($changed.Count)" }
           git -C upstream diff --stat
 
       - name: Initialize MSVC (${{ matrix.arch }})
