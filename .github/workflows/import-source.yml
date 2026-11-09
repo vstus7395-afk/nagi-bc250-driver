@@ -31,6 +31,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Import the source tree as a fresh root commit, avoiding upstream history
+          # and the upstream repository's own Actions workflows.
+          git -C source switch --orphan upstream-import
+          if (Test-Path source/.github/workflows) { Remove-Item -Recurse -Force source/.github/workflows }
+          git -C source add -A
+          git -C source -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Import Nagi tester.37 source snapshot"
           git -C source push "https://x-access-token:$env:GH_TOKEN@github.com/${{ github.repository }}.git" HEAD:refs/heads/upstream-tester.37
 
       - name: Apply patch and publish patched source branch
