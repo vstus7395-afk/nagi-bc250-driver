@@ -22,7 +22,7 @@ jobs:
       - name: Check out the exact Nagi source release
         shell: pwsh
         run: |
-          git clone --depth 1 --branch v0.7.216.109-tester.37 --single-branch https://github.com/D-Ogi/amdgpu-wddm.git source
+          git clone --branch v0.7.216.109-tester.37 --single-branch https://github.com/D-Ogi/amdgpu-wddm.git source
           if ($LASTEXITCODE -ne 0) { throw "Could not clone the upstream tester.37 source" }
 
       - name: Publish unmodified source branch
