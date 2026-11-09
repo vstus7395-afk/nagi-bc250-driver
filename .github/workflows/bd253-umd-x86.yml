@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: D-Ogi/vkd3d-proton
-          ref: 47cf677139bb3f9b1e6e199d5a85dfa33a373076
+          ref: 507890134f8e3e1313d45f03c6bbe7ddde8bda7a
           path: vkd3d-proton
           persist-credentials: false
 
