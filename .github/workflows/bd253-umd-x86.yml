@@ -133,6 +133,7 @@ jobs:
           $oldGate = '-VsInstall $VsInstall -Arch $Arch' + [char]10
           $newGate = '-VsInstall $VsInstall -Arch $Arch -Compiler $Compiler -MsvcReason $MsvcReason' + [char]10
           Replace-Once $buildUmd $oldGate $newGate 3
+          Replace-Once $buildUmd '& $compilerExe @dllFlags /Fe:fsr-identity-test.exe' '& $compilerExe @dllFlags /wd4127 /Fe:fsr-identity-test.exe'
 
           Write-Host 'CI build gates now use the explicitly requested MSVC mode; no tests are disabled.'
 
