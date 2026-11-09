@@ -37,9 +37,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git -C upstream -c core.whitespace=cr-at-eol apply --recount --check "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          $patch = Join-Path $env:GITHUB_WORKSPACE 'patches\NAGI_GDI1_shared_open_fix.patch'
+          $patchText = [IO.File]::ReadAllText($patch).Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($patch, $patchText)
+          git -C upstream config core.autocrlf false
+          git -C upstream reset --hard HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Could not normalize upstream checkout: $LASTEXITCODE" }
+          git -C upstream apply --recount --check $patch
           if ($LASTEXITCODE -ne 0) { throw "Patch check failed: $LASTEXITCODE" }
-          git -C upstream -c core.whitespace=cr-at-eol apply --recount "$env:GITHUB_WORKSPACE/patches/NAGI_GDI1_shared_open_fix.patch"
+          git -C upstream apply --recount $patch
           if ($LASTEXITCODE -ne 0) { throw "Patch application failed: $LASTEXITCODE" }
           git -C upstream diff --check
           if ($LASTEXITCODE -ne 0) { throw "Whitespace check failed: $LASTEXITCODE" }
