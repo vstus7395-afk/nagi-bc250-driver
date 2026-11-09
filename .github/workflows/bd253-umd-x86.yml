@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: bd253-umd-x86-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-umd-x86:
     runs-on: windows-2022
