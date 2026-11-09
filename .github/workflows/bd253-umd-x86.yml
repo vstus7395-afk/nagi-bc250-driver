@@ -20,6 +20,14 @@ jobs:
       - name: Checkout overlay
         uses: actions/checkout@v4
 
+      - name: Cache pinned Windows build toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/nuget
+            toolchain/llvm-23.1.4-win64
+          key: windows-2022-bd253-tester37-sdk-wdk-llvm-23.1.4-v1
+
       - name: Checkout exact upstream tester.37
         uses: actions/checkout@v4
         with:
@@ -116,7 +124,7 @@ jobs:
           }
           python -m pip install --disable-pip-version-check zstandard
           if ($LASTEXITCODE -ne 0) { throw 'Could not install Python zstandard decoder' }
-          python -c "import sys,zstandard; zstandard.ZstdDecompressor().copy_stream(open(sys.argv[1],'rb'),open(sys.argv[2],'wb'))" $archive $tar
+          python -c "import sys,zstandard; zstandard.ZstdDecompressor(max_window_size=4194304).copy_stream(open(sys.argv[1],'rb'),open(sys.argv[2],'wb'))" $archive $tar
           if ($LASTEXITCODE -ne 0) { throw 'Could not decompress LLVM archive' }
           $llvm = Join-Path $root 'toolchain\llvm-23.1.4-win64'
           New-Item -ItemType Directory -Force $llvm | Out-Null
