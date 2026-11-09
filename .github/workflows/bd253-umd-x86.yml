@@ -110,14 +110,14 @@ jobs:
               if($DdiInclude){$flags=@("/external:I$DdiInclude")+$flags}
               $flags=ConvertTo-Bc250ClangFlags $flags $Arch @($repo)
           '@
-          $oldFlags = $oldFlags.Substring(1)
+          $oldFlags = $oldFlags.Substring(1).Replace($crlf, $lf)
           $newFlags = @'
               $flags=@('/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/MT','/DNOMINMAX')
               $headers=@($wdk, (Join-Path $wdk '..\shared'))
               if($DdiInclude){$headers=@($DdiInclude)+$headers}
               $flags=Get-Bc250HostTestFlags $Compiler $flags $headers $Arch @($repo)
           '@
-          $newFlags = $newFlags.Substring(1)
+          $newFlags = $newFlags.Substring(1).Replace($crlf, $lf)
           Replace-Once $genericTest $oldFlags $newFlags
 
           $oldGate = '-VsInstall $VsInstall -Arch $Arch' + [char]10
