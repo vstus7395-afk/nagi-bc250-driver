@@ -1,6 +1,6 @@
 --- a/driver/contract/bc250_shared_surface.h
 +++ b/driver/contract/bc250_shared_surface.h
-@@ -342,6 +342,78 @@
+@@ -342,7 +342,79 @@
                                            Why);
  }
  
@@ -81,7 +81,7 @@
                                               BC250_SHARED_SURFACE *Out)
 --- a/driver/umd/d3d12/engine-ddi/resources.cpp
 +++ b/driver/umd/d3d12/engine-ddi/resources.cpp
-@@ -969,8 +969,24 @@
+@@ -969,9 +969,25 @@
      // 2026-10-06). The strings are the header's literals, so the pointer outlives this call.
      *why = BC250_SHARED_SURFACE_WHY_ARGUMENTS;
      BC250_SHARED_SURFACE shared{};
