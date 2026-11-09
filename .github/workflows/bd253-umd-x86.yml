@@ -25,7 +25,6 @@ jobs:
         with:
           path: |
             toolchain/nuget
-            toolchain/llvm-23.1.4-win64
           key: windows-2022-bd253-tester37-sdk-wdk-llvm-23.1.4-v1
 
       - name: Checkout exact upstream tester.37
@@ -73,6 +72,47 @@ jobs:
           if ($changed.Count -ne 3) { throw "Expected exactly 3 patched source files, got $($changed.Count)" }
           git -C upstream diff --stat
 
+      - name: Route all host gates through the supported MSVC build mode
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Replace-Once([string]$Path, [string]$Old, [string]$New, [int]$Expected = 1) {
+            $source = [IO.File]::ReadAllText($Path)
+            $count = ([regex]::Matches($source, [regex]::Escape($Old))).Count
+            if ($count -ne $Expected) { throw "Expected $Expected occurrence(s) in $Path, found $count" }
+            [IO.File]::WriteAllText($Path, $source.Replace($Old, $New))
+          }
+
+          $buildEngine = Join-Path $env:GITHUB_WORKSPACE 'upstream\tools\build\build-engine-ddi.ps1'
+          $genericTest = Join-Path $env:GITHUB_WORKSPACE 'upstream\tools\build\build-generic-signature-test.ps1'
+          $buildUmd = Join-Path $env:GITHUB_WORKSPACE 'upstream\tools\build\build-umd-d3d12.ps1'
+
+          Replace-Once $buildEngine '-VsInstall $VsInstall -Arch $Arch -DdiInclude $DdiInclude' '-VsInstall $VsInstall -Arch $Arch -DdiInclude $DdiInclude -Compiler $Compiler -MsvcReason $MsvcReason'
+
+          Replace-Once $genericTest 'param([string]$OutputDir, [string]$VsInstall, [ValidateSet(''x64'',''x86'')][string]$Arch=''x64'', [string]$DdiInclude)' 'param([string]$OutputDir, [string]$VsInstall, [ValidateSet(''x64'',''x86'')][string]$Arch=''x64'', [string]$DdiInclude, [ValidateSet(''clang-cl'',''msvc'')][string]$Compiler=''clang-cl'', [string]$MsvcReason='''')'
+          Replace-Once $genericTest '$compiler=Resolve-Bc250UmdCompiler $root ''clang-cl'' '''' $OutputDir $Arch' '$compiler=Resolve-Bc250UmdCompiler $root $Compiler $MsvcReason $OutputDir $Arch'
+
+          $oldFlags = @'
+          $flags=@('/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/MT','/DNOMINMAX','/external:W0',
+                  "/external:I$wdk","/external:I$wdk/../shared")
+          if($DdiInclude){$flags=@("/external:I$DdiInclude")+$flags}
+          $flags=ConvertTo-Bc250ClangFlags $flags $Arch @($repo)
+          '@.TrimStart()
+          $newFlags = @'
+          $flags=@('/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/MT','/DNOMINMAX')
+          $headers=@($wdk, (Join-Path $wdk '..\shared'))
+          if($DdiInclude){$headers=@($DdiInclude)+$headers}
+          $flags=Get-Bc250HostTestFlags $Compiler $flags $headers $Arch @($repo)
+          '@.TrimStart()
+          Replace-Once $genericTest $oldFlags $newFlags
+
+          $oldGate = '-VsInstall $VsInstall -Arch $Arch' + [Environment]::NewLine
+          $newGate = '-VsInstall $VsInstall -Arch $Arch -Compiler $Compiler -MsvcReason $MsvcReason' + [Environment]::NewLine
+          Replace-Once $buildUmd $oldGate $newGate 3
+
+          Write-Host 'CI build gates now use the explicitly requested MSVC mode; no tests are disabled.'
+
       - name: Download pinned Windows SDK, WDK and D3D12 headers
         shell: pwsh
         run: |
@@ -108,28 +148,6 @@ jobs:
           foreach ($path in $required) {
             if (-not (Test-Path -LiteralPath $path)) { throw "Missing required build input: $path" }
           }
-
-      - name: Install pinned LLVM 23.1.4 for the DXIL signature gate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = $env:GITHUB_WORKSPACE
-          $archive = Join-Path $env:RUNNER_TEMP 'clang-llvm-23.1.4-windows-x64.tar.xz'
-          $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/clang%2Bllvm-23.1.4-x86_64-pc-windows-msvc.tar.xz'
-          Invoke-WebRequest -Uri $url -OutFile $archive
-          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne '854bffcfc84528e0ee92490ff5c178920abd358a79c3e98f053e41e3e8e4c6d2') {
-            throw "LLVM archive SHA-256 mismatch: $hash"
-          }
-          $llvm = Join-Path $root 'toolchain\llvm-23.1.4-win64'
-          New-Item -ItemType Directory -Force $llvm | Out-Null
-          tar.exe -xf $archive -C $llvm --strip-components=1
-          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the official LLVM xz archive' }
-          $clang = Join-Path $llvm 'bin\clang-cl.exe'
-          if (-not (Test-Path -LiteralPath $clang)) { throw "LLVM archive lacks clang-cl.exe: $clang" }
-          & $clang --version
-          if ($LASTEXITCODE -ne 0) { throw 'Pinned clang-cl does not start' }
-          Remove-Item -LiteralPath $archive -Force
 
       - name: Build 32-bit D3D12 UMD and engine-ddi
         shell: pwsh
