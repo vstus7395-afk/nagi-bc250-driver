@@ -48,6 +48,16 @@ jobs:
           path: vkd3d-proton
           persist-credentials: false
 
+      - name: Checkout exact x86 RADV Mesa host contract header
+        uses: actions/checkout@v4
+        with:
+          repository: D-Ogi/mesa-amdgpu-wddm
+          ref: e51ad6ea9ddf9351b12d8826303e99e2df42ad18
+          path: mesa
+          sparse-checkout: |
+            src/util
+          sparse-checkout-cone-mode: true
+
       - name: Checkout pinned Vulkan headers
         uses: actions/checkout@v4
         with:
@@ -168,8 +178,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
           $out = Join-Path $root 'out\d3d12-umd-x86'
-          $mesa = Join-Path $root 'mesa-header-root'
-          New-Item -ItemType Directory -Force (Join-Path $mesa 'src\util') | Out-Null
+          $mesa = Join-Path $root 'mesa'
+          if (-not (Test-Path -LiteralPath (Join-Path $mesa 'src\util\bc250_host_bootstrap.h'))) { throw 'Pinned x86 Mesa host-contract header is missing' }
 
           $wdk = Join-Path $root 'toolchain\nuget\microsoft.windows.wdk.x64\c\Include\10.0.26100.0\um'
           $api = Join-Path $root 'toolchain\nuget\microsoft.direct3d.d3d12.1.619.6\build\native\include'
