@@ -1,0 +1,34 @@
+name: Build L2 AGP warning suppressor
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/l2-agp-warning-only
+    paths:
+      - 'tools/l2-agp-warning-suppressor/**'
+      - '.github/workflows/build-l2-agp-warning-suppressor.yml'
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure x86
+        run: cmake -S tools/l2-agp-warning-suppressor -B build/l2-agp-warning -A Win32
+      - name: Build Release
+        run: cmake --build build/l2-agp-warning --config Release --parallel
+      - name: Verify PE architecture and exports
+        shell: pwsh
+        run: |
+          $dll = "build/l2-agp-warning/out/Release/dinput8.dll"
+          if (!(Test-Path $dll)) { throw "DLL not found: $dll" }
+          $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
+          & $dumpbin /headers $dll | Select-String "14C machine"
+          if ($LASTEXITCODE -ne 0) { throw "Not a valid x86 PE DLL" }
+          & $dumpbin /exports $dll
+          if ($LASTEXITCODE -ne 0) { throw "Export verification failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: L2-AGP-Warning-Suppressor-x86
+          path: build/l2-agp-warning/out/Release/dinput8.dll
+          if-no-files-found: error
+          retention-days: 30
