@@ -1,0 +1,21 @@
+name: BD-253 protected-file installer tests
+on:
+  push:
+    branches:
+      - fix/shared-resize-layout-20261111
+    paths:
+      - tools/install-bd253-test-umd.ps1
+      - tools/test-bd253-installer.ps1
+      - .github/workflows/bd253-installer-test.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify protected-file copy and rollback in Windows PowerShell 5.1
+        shell: powershell
+        run: .\tools\test-bd253-installer.ps1
