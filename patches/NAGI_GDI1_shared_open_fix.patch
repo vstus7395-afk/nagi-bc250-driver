@@ -167,3 +167,31 @@ index 027226ae4e17eedaa781b9175e35d802c4fe2b49..a1756311daa8f9deb2fa98f88008f35f
      case BC250_SHARED_SURFACE_OK:
          break;
      case BC250_SHARED_SURFACE_FORMAT:
+
+@@ -1979,10 +1979,20 @@
+     *why = "layout agreement";
+-    if (surface.info.RowPitch != shared.Pitch || surface.backing_size > shared.Size) {
+-        log_line("shared open: the engine's linear image of this description has pitch %llu and needs %llu bytes; the "
+-                 "record says pitch %lu and %llu bytes",
+-                 static_cast<unsigned long long>(surface.info.RowPitch),
+-                 static_cast<unsigned long long>(surface.backing_size), shared.Pitch,
+-                 static_cast<unsigned long long>(shared.Size));
+-        return E_INVALIDARG;
+-    }
++    // VidMm receives ROUND_TO_PAGES(private->Size) in KMD CreateAllocation. The private record's
++    // Size remains the logical byte count, so compare with the actual page-rounded allocation.
++    const uint64_t shared_allocation_size =
++        (static_cast<uint64_t>(shared.Size) + kLinearPage - 1) & ~(kLinearPage - 1);
++    if (surface.backing_size > shared.Size || surface.info.RowPitch != shared.Pitch) {
++        log_refusal("shared open: layout values for %llux%u: engine pitch %llu, backing %llu; record pitch %lu, "
++                    "logical bytes %llu, page-rounded allocation %llu",
++                    static_cast<unsigned long long>(desc.Width), desc.Height,
++                    static_cast<unsigned long long>(surface.info.RowPitch),
++                    static_cast<unsigned long long>(surface.backing_size), shared.Pitch,
++                    static_cast<unsigned long long>(shared.Size),
++                    static_cast<unsigned long long>(shared_allocation_size));
++    }
++    if (surface.info.RowPitch != shared.Pitch || surface.backing_size > shared_allocation_size)
++        return E_INVALIDARG;
+ 
+     *why = "adopt";
