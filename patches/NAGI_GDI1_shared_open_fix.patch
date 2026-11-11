@@ -167,8 +167,7 @@ index 027226ae4e17eedaa781b9175e35d802c4fe2b49..a1756311daa8f9deb2fa98f88008f35f
      case BC250_SHARED_SURFACE_OK:
          break;
      case BC250_SHARED_SURFACE_FORMAT:
-
-@@ -1979,10 +1979,20 @@
+@@ -1000,11 +1004,18 @@
      *why = "layout agreement";
 -    if (surface.info.RowPitch != shared.Pitch || surface.backing_size > shared.Size) {
 -        log_line("shared open: the engine's linear image of this description has pitch %llu and needs %llu bytes; the "
