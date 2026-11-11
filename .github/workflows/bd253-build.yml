@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - try/d3d9on12-bare-allocation
+      - fix/shared-resize-layout-20261111
     paths:
       - patches/NAGI_GDI1_shared_open_fix.patch
       - .github/workflows/bd253-build.yml
@@ -29,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: D-Ogi/amdgpu-wddm
-          ref: v0.7.216.109-tester.37
+          ref: ec5326029afdc7950a2068ed5eece46a965b4eed
           path: upstream
           persist-credentials: false
 

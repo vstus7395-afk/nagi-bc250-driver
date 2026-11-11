@@ -1,8 +1,35 @@
 diff --git a/driver/contract/bc250_shared_surface.h b/driver/contract/bc250_shared_surface.h
-index 88c57a8bbe01eb44810f1dd5e197246c9b8819ef..f0307896b75d1b673311c0db312e2918d1775727 100644
+index 88c57a8b..e99486e2 100644
 --- a/driver/contract/bc250_shared_surface.h
 +++ b/driver/contract/bc250_shared_surface.h
-@@ -342,6 +342,88 @@ static __inline int Bc250SharedSurfaceDecodeWhy(const void *ResourceData, unsign
+@@ -100,6 +100,26 @@ typedef struct _BC250_SHARED_SURFACE {
+     unsigned long Access;
+ } BC250_SHARED_SURFACE;
+ 
++/* KMD CreateAllocation preserves the logical LB7A Size but gives VidMm whole 4096-byte pages.
++ * Check the engine's complete backing against those pages, without relaxing row-pitch agreement.
++ * Keep this arithmetic 64-bit in the WoW64 UMD too. Zero and overflowing sizes are not allocations.
++ * AllocationBytes is diagnostic output only, and is zero on an invalid logical size. */
++static __inline int Bc250SharedSurfaceLayoutFits(const BC250_SHARED_SURFACE *Surface,
++                                                unsigned long long EnginePitch,
++                                                unsigned long long EngineBytes,
++                                                unsigned long long *AllocationBytes)
++{
++    unsigned long long bytes;
++    if (AllocationBytes)
++        *AllocationBytes = 0;
++    if (!Surface || !Surface->Size || Surface->Size > ~0ull - 4095ull)
++        return 0;
++    bytes = (Surface->Size + 4095ull) & ~4095ull;
++    if (AllocationBytes)
++        *AllocationBytes = bytes;
++    return EnginePitch && EnginePitch == Surface->Pitch && EngineBytes && EngineBytes <= bytes;
++}
++
+ /* Which records an opener admits. RequireShared 1 takes only a record that shares; AccessMask is
+  * the set of BC250_SURFACE_RESOURCE_* access bits it admits (0: a plain texture only). */
+ typedef struct _BC250_SHARED_SURFACE_ADMIT {
+@@ -342,6 +362,88 @@ static __inline int Bc250SharedSurfaceDecodeWhy(const void *ResourceData, unsign
                                            Why);
  }
  
@@ -92,10 +119,10 @@ index 88c57a8bbe01eb44810f1dd5e197246c9b8819ef..f0307896b75d1b673311c0db312e2918
                                               const void *AllocationData, unsigned int AllocationBytes,
                                               BC250_SHARED_SURFACE *Out)
 diff --git a/driver/contract/test/shared-surface-test.cpp b/driver/contract/test/shared-surface-test.cpp
-index 61c2e0d0aa25f474e0ab5f5a3d27463b2fb5d941..da815bbe8d31dab24b7ab4dd47cdbc0c99ead60d 100644
+index 61c2e0d0..e7c96cf7 100644
 --- a/driver/contract/test/shared-surface-test.cpp
 +++ b/driver/contract/test/shared-surface-test.cpp
-@@ -423,6 +423,52 @@ int main() {
+@@ -423,6 +423,120 @@ int main() {
          check(composed >= 5 && round_trips >= composed, "every composed row encodes and decodes, with its sRGB view");
      }
  
@@ -145,11 +172,79 @@ index 61c2e0d0aa25f474e0ab5f5a3d27463b2fb5d941..da815bbe8d31dab24b7ab4dd47cdbc0c
 +              "bare allocation: short size refused");
 +    }
 +
++    // Shared-open layout uses the physical page allocation, not the logical record size.
++    {
++        BC250_SHARED_SURFACE surface{};
++        surface.Pitch = 5632;
++        surface.Size = 4708352; // 1408 padded pixels * 836 rows * 4 bytes
++        unsigned long long allocation = 0;
++        check(Bc250SharedSurfaceLayoutFits(&surface, 5632, 4710400, &allocation) && allocation == 4710400,
++              "layout: partial final page is available to the engine (old comparison refused)");
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 5632, 4710401, &allocation),
++              "layout: one byte beyond the physical allocation is refused");
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 5888, 4710400, &allocation),
++              "layout: page rounding never permits a different row pitch");
++        surface.Size = 4710400;
++        check(Bc250SharedSurfaceLayoutFits(&surface, 5632, 4710400, &allocation) && allocation == surface.Size,
++              "layout: an exact page allocation stays unchanged");
++        surface.Size = 0xffffffffull;
++        check(Bc250SharedSurfaceLayoutFits(&surface, 5632, 0x100000000ull, &allocation) &&
++                  allocation == 0x100000000ull,
++              "layout: UINT32_MAX rounds in 64 bits even in the x86 UMD");
++        surface.Size = ~0ull - 4095ull;
++        check(Bc250SharedSurfaceLayoutFits(&surface, 5632, surface.Size, &allocation) && allocation == surface.Size,
++              "layout: largest non-overflowing page allocation");
++        surface.Size++;
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 5632, 4096, &allocation) && allocation == 0,
++              "layout: page rounding overflow is refused");
++        surface.Size = ~0ull;
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 5632, 4096, &allocation) && allocation == 0,
++              "layout: UINT64_MAX is refused");
++        surface.Size = 0;
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 5632, 4096, &allocation) && allocation == 0,
++              "layout: zero logical bytes are refused");
++        surface.Size = 4096;
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 5632, 0, &allocation),
++              "layout: zero engine backing is refused");
++        surface.Pitch = 0;
++        check(!Bc250SharedSurfaceLayoutFits(&surface, 0, 4096, &allocation),
++              "layout: zero pitches are refused");
++        check(!Bc250SharedSurfaceLayoutFits(nullptr, 256, 4096, &allocation) && allocation == 0,
++              "layout: null surface is refused");
++
++        // Synthetic geometry, not measured RADV output. Sweep both dimensions independently.
++        // Compute the reference page count by division, independently of the production bit mask.
++        for (unsigned axis = 0; axis < 2; ++axis) {
++            bool all_fit = true, all_short_refused = true, all_pitches_refused = true;
++            unsigned rescued = 0;
++            for (unsigned edge = 1; edge <= 2048; ++edge) {
++                const unsigned width = axis == 0 ? edge : 1327;
++                const unsigned height = axis == 0 ? 949 : edge;
++                const unsigned pitch = ((width + 63u) / 64u) * 256u;
++                const unsigned rows = ((height + 3u) / 4u) * 4u;
++                surface.Pitch = pitch;
++                surface.Size = static_cast<unsigned long long>(pitch) * rows;
++                const unsigned long long pages = (surface.Size / 4096 + (surface.Size % 4096 != 0)) * 4096;
++                all_fit &= Bc250SharedSurfaceLayoutFits(&surface, pitch, pages, nullptr) != 0;
++                rescued += pages > surface.Size ? 1u : 0u;
++                all_pitches_refused &= !Bc250SharedSurfaceLayoutFits(&surface, pitch + 256ull, pages, nullptr);
++                surface.Size = pages - 4096;
++                all_short_refused &= !Bc250SharedSurfaceLayoutFits(&surface, pitch, pages, nullptr);
++            }
++            check(all_fit && rescued != 0, axis == 0 ? "horizontal resize: valid rounded layouts admitted"
++                                                    : "vertical resize: valid rounded layouts admitted");
++            check(all_short_refused, axis == 0 ? "horizontal resize: insufficient allocations refused"
++                                              : "vertical resize: insufficient allocations refused");
++            check(all_pitches_refused, axis == 0 ? "horizontal resize: pitch mismatches refused"
++                                               : "vertical resize: pitch mismatches refused");
++        }
++    }
++
      // The count the records quote, printed by the thing that knows it. Three documents disagreed about it before
      // this line existed (44, 48 and 49), because each one was counted by hand (BD-075 review, 2026-10-06).
      std::printf("%u checks, %u failures\n", checks, failures);
 diff --git a/driver/umd/d3d12/engine-ddi/resources.cpp b/driver/umd/d3d12/engine-ddi/resources.cpp
-index 027226ae4e17eedaa781b9175e35d802c4fe2b49..a1756311daa8f9deb2fa98f88008f35ff7a0c949 100644
+index 027226ae..ecbf5387 100644
 --- a/driver/umd/d3d12/engine-ddi/resources.cpp
 +++ b/driver/umd/d3d12/engine-ddi/resources.cpp
 @@ -969,8 +969,12 @@ HRESULT open_shared_surface(DeviceContext* c, const D3D12DDIARG_OPENHEAP_0003* a
@@ -167,7 +262,9 @@ index 027226ae4e17eedaa781b9175e35d802c4fe2b49..a1756311daa8f9deb2fa98f88008f35f
      case BC250_SHARED_SURFACE_OK:
          break;
      case BC250_SHARED_SURFACE_FORMAT:
-@@ -1000,11 +1004,18 @@
+@@ -998,14 +1002,30 @@ HRESULT open_shared_surface(DeviceContext* c, const D3D12DDIARG_OPENHEAP_0003* a
+     // an assertion about our own code, and a divergence names both numbers on one line instead of showing wrong
+     // pixels (BD-075 review, 2026-10-06).
      *why = "layout agreement";
 -    if (surface.info.RowPitch != shared.Pitch || surface.backing_size > shared.Size) {
 -        log_line("shared open: the engine's linear image of this description has pitch %llu and needs %llu bytes; the "
@@ -175,22 +272,31 @@ index 027226ae4e17eedaa781b9175e35d802c4fe2b49..a1756311daa8f9deb2fa98f88008f35f
 -                 static_cast<unsigned long long>(surface.info.RowPitch),
 -                 static_cast<unsigned long long>(surface.backing_size), shared.Pitch,
 -                 static_cast<unsigned long long>(shared.Size));
--        return E_INVALIDARG;
--    }
 +    // VidMm receives ROUND_TO_PAGES(private->Size) in KMD CreateAllocation. The private record's
 +    // Size remains the logical byte count, so compare with the actual page-rounded allocation.
-+    const uint64_t shared_allocation_size =
-+        (static_cast<uint64_t>(shared.Size) + kLinearPage - 1) & ~(kLinearPage - 1);
-+    if (surface.backing_size > shared.Size || surface.info.RowPitch != shared.Pitch) {
-+        log_refusal("shared open: layout values for %llux%u: engine pitch %llu, backing %llu; record pitch %lu, "
-+                    "logical bytes %llu, page-rounded allocation %llu",
-+                    static_cast<unsigned long long>(desc.Width), desc.Height,
++    unsigned long long shared_allocation_size = 0;
++    const bool layout_fits = Bc250SharedSurfaceLayoutFits(&shared, surface.info.RowPitch,
++                                                         surface.backing_size, &shared_allocation_size) != 0;
++    // Successful rounded opens must not consume the process-wide refusal budget during resize.
++    // Keep one positive diagnostic, and retain the operands for each actual layout refusal.
++    static std::atomic<bool> rounded_open_logged{false};
++    const bool first_rounded_open = layout_fits && surface.backing_size > shared.Size &&
++        !rounded_open_logged.exchange(true, std::memory_order_relaxed);
++    if (!layout_fits || first_rounded_open) {
++        log_refusal("shared open: layout %s for %llux%u format %u: engine pitch %llu, backing %llu; record pitch %lu, "
++                    "logical bytes %llu, page-rounded allocation %llu, memory %llu, alignment %llu",
++                    layout_fits ? "accepted (page rounding)" : "refused",
++                    static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(desc.Format),
 +                    static_cast<unsigned long long>(surface.info.RowPitch),
 +                    static_cast<unsigned long long>(surface.backing_size), shared.Pitch,
 +                    static_cast<unsigned long long>(shared.Size),
-+                    static_cast<unsigned long long>(shared_allocation_size));
++                    shared_allocation_size,
++                    static_cast<unsigned long long>(surface.info.MemorySize),
++                    static_cast<unsigned long long>(surface.info.MemoryAlignment));
 +    }
-+    if (surface.info.RowPitch != shared.Pitch || surface.backing_size > shared_allocation_size)
-+        return E_INVALIDARG;
++    if (!layout_fits)
+         return E_INVALIDARG;
+-    }
  
      *why = "adopt";
+     AdoptRequest adopt{};
