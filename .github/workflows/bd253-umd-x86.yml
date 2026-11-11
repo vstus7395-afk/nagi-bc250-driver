@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - try/d3d9on12-bare-allocation
+      - fix/shared-resize-layout-20261111
     paths:
       - patches/NAGI_GDI1_shared_open_fix.patch
       - .github/workflows/bd253-umd-x86.yml
@@ -216,7 +217,7 @@ jobs:
       - name: Upload 32-bit D3D12 UMD test build
         uses: actions/upload-artifact@v4
         with:
-          name: nagi-tester37-bd253-d3d12-umd-x86
+          name: nagi-tester37-resize-umd-x86-${{ github.run_id }}-${{ github.sha }}
           path: |
             out/d3d12-umd-x86/amdgpu_wddm_d3d12.dll
             out/d3d12-umd-x86/install-bd253-test-umd.ps1
