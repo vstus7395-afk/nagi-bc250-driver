@@ -10,7 +10,7 @@ function Copy-Bd253File([string]$Source, [string]$Target) {
     try {
         $name = Split-Path -Leaf $Target
         Copy-Item -LiteralPath $Source -Destination (Join-Path $stage $name) -ErrorAction Stop
-        & "$env:SystemRoot\System32\robocopy.exe" $stage (Split-Path -Parent $Target) $name /B /COPY:DAT /IS /IT /R:0 /W:0 /NP /NFL /NDL /NJH /NJS | Out-Host
+        & "$env:SystemRoot\System32\robocopy.exe" $stage (Split-Path -Parent $Target) $name /B /COPY:DAT /IS /IT /IM /R:0 /W:0 /NP | Out-Host
         $copyExit = $LASTEXITCODE
         if ($copyExit -ge 8) { throw "Robocopy failed with code $copyExit. No permissions were changed." }
         if ((Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash) {
