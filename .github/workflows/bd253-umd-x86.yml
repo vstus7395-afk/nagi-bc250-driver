@@ -5,8 +5,10 @@ on:
     branches:
       - try/d3d9on12-bare-allocation
       - fix/shared-resize-layout-20261111
+      - diagnostics/l2-mode-switch-20261112
     paths:
       - patches/NAGI_GDI1_shared_open_fix.patch
+      - patches/BC250_L2_HANGDIAG.patch
       - .github/workflows/bd253-umd-x86.yml
   workflow_dispatch:
 
@@ -82,11 +84,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Patch check failed: $LASTEXITCODE" }
           git -C upstream apply --recount $patch
           if ($LASTEXITCODE -ne 0) { throw "Patch application failed: $LASTEXITCODE" }
+          $diag = Join-Path $env:GITHUB_WORKSPACE 'patches\BC250_L2_HANGDIAG.patch'
+          $diagText = [IO.File]::ReadAllText($diag).Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($diag, $diagText)
+          git -C upstream apply --recount --check $diag
+          if ($LASTEXITCODE -ne 0) { throw "Hang diagnostic patch check failed: $LASTEXITCODE" }
+          git -C upstream apply --recount $diag
+          if ($LASTEXITCODE -ne 0) { throw "Hang diagnostic patch application failed: $LASTEXITCODE" }
           git -C upstream diff --check
           if ($LASTEXITCODE -ne 0) { throw "Whitespace check failed: $LASTEXITCODE" }
           $changed = @(git -C upstream diff --name-only)
           Write-Host ($changed -join "`n")
-          if ($changed.Count -ne 3) { throw "Expected exactly 3 patched source files, got $($changed.Count)" }
+          if ($changed.Count -ne 4) { throw "Expected exactly 4 patched source files, got $($changed.Count)" }
           git -C upstream diff --stat
 
       - name: Download pinned Windows SDK, WDK and D3D12 headers
@@ -217,7 +226,7 @@ jobs:
       - name: Upload 32-bit D3D12 UMD test build
         uses: actions/upload-artifact@v4
         with:
-          name: nagi-tester37-resize-umd-x86-${{ github.run_id }}-${{ github.sha }}
+          name: nagi-tester37-hangdiag-umd-x86-${{ github.run_id }}-${{ github.sha }}
           path: |
             out/d3d12-umd-x86/amdgpu_wddm_d3d12.dll
             out/d3d12-umd-x86/install-bd253-test-umd.ps1

@@ -1,0 +1,172 @@
+diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-ddi/commands.cpp
+--- a/driver/umd/d3d12/engine-ddi/commands.cpp
++++ b/driver/umd/d3d12/engine-ddi/commands.cpp
+@@ -201,70 +201,98 @@
+-void APIENTRY close_list(D3D12DDI_HCOMMANDLIST h) {
+-    CommandListRecord* l = list_of(h, "CloseCommandList");
+-    if (!l) return;
+-    const HRESULT earlier = l->close_hr.load(std::memory_order_relaxed);
+-    if (FAILED(earlier)) return l->h.device->report_list(l->rt, earlier);
+-    record(l, [hr = &l->close_hr](ID3D12GraphicsCommandList* e) noexcept {
+-        const HRESULT result = e->Close();
+-        if (FAILED(result)) hr->store(result, std::memory_order_relaxed);
+-    });
+-    // With the policy off, a tail left from before it was turned off names nothing (the teardown replayed it).
+-    Replay* replay = l->h.device->replay;
+-    const uint64_t tail = replay ? l->replay_tail.load(std::memory_order_relaxed) : 0;
+-    const HRESULT hr = l->close_hr.load(std::memory_order_relaxed);
+-    if (FAILED(hr)) {
+-        l->h.device->report_list(l->rt, hr);
+-        if (!tail) return;
+-    }
+-    l->recording = false;
+-    if (tail) {
+-        // The list is complete: its worker need not wait for a later publish to replay it.
+-        wake_for(replay, tail);
+-        if (auto* p = l->pool ? record_of<CommandPoolRecord>(l->pool, Tag::CommandPool, l->h.device) : nullptr)
+-            p->closing[(tail >> 56) - 1].store(tail & kReplayPositionMask, std::memory_order_relaxed);
+-    }
+-    if (l->pool) leave_pool(l);
+-}
+-
+-void APIENTRY reset_list(D3D12DDI_HCOMMANDLIST h, const D3D12DDIARG_RESETCOMMANDLIST_0040* args) {
+-    CommandListRecord* l = list_of(h, "ResetCommandList");
+-    if (!l) return;
+-    const HRESULT closed = drain_list(l, Drain::Reset);
+-    // D3D12 Close failures permanently invalidate that list (CPUEfficiency, Runtime Validation for Reset).
+-    // A successful Close still permits the normal Reset below; this is not a device-wide latch.
+-    if (FAILED(closed)) return l->h.device->report_list(l->rt, closed);
+-    DeviceContext* c = l->h.device;
+-    auto* r = args ? record_of<CommandRecorderRecord>(args->hDrvCommandRecorder.pDrvPrivate, Tag::CommandRecorder, c)
+-                   : nullptr;
+-    // The pool may have been destroyed since it became the target: its record is poisoned then.
+-    CommandPoolRecord* p = r ? record_of<CommandPoolRecord>(r->pool, Tag::CommandPool, c) : nullptr;
+-    if (!p) {
+-        c->report_list(l->rt, E_INVALIDARG);
+-        return;
+-    }
+-    drain_closes(c, p->closing);                // another list's pending Close still reaches the allocator
+-    ID3D12CommandAllocator*& a = p->allocators[l->type];
+-    if (!a) {
+-        HRESULT hr = c->device->CreateCommandAllocator(l->type, __uuidof(ID3D12CommandAllocator),
+-                                                       reinterpret_cast<void**>(&a));
+-        if (FAILED(hr)) {
+-            a = nullptr;
+-            c->report_list(l->rt, hr);
+-            return;
+-        }
+-    }
+-    HRESULT hr = l->list()->Reset(a, nullptr);
+-    if (FAILED(hr)) {
+-        c->report_list(l->rt, hr);
+-        return;
+-    }
+-    if (l->pool) leave_pool(l);                 // a Reset without a Close: the list leaves its earlier pool
+-    l->root_signatures[0] = l->root_signatures[1] = nullptr;   // the engine's Reset unbound them
+-    // BD-133: the engine's Reset dropped the list's commands, a Present copy among them, so the list carries no ticket
+-    // any more. A ticket that was never executed removes the device here (present-copy-sync.h, rule D). A Reset that
+-    // failed above keeps the ticket: the old commands are still there.
+-    l->present_copy.release();
+-    l->recording = true;
+-    l->pool = p;
+-    p->open_lists.fetch_add(1, std::memory_order_release);
+-}
+-
++void APIENTRY close_list(D3D12DDI_HCOMMANDLIST h) {
++    CommandListRecord* l = list_of(h, "CloseCommandList");
++    if (!l) return;
++    if (!l->recording)
++        log_line("BC250-HANGDIAG close_without_recording list=%p tid=%lu ms=%llu",
++                 static_cast<void*>(l), GetCurrentThreadId(),
++                 static_cast<unsigned long long>(GetTickCount64()));
++    const HRESULT earlier = l->close_hr.load(std::memory_order_relaxed);
++    if (FAILED(earlier)) {
++        log_line("BC250-HANGDIAG close_previous_failure list=%p hr=%08lx tid=%lu ms=%llu",
++                 static_cast<void*>(l), static_cast<unsigned long>(earlier), GetCurrentThreadId(),
++                 static_cast<unsigned long long>(GetTickCount64()));
++        return l->h.device->report_list(l->rt, earlier);
++    }
++    record(l, [hr = &l->close_hr, l](ID3D12GraphicsCommandList* e) noexcept {
++        const HRESULT result = e->Close();
++        if (FAILED(result)) {
++            log_line("BC250-HANGDIAG engine_close_failed list=%p hr=%08lx tid=%lu ms=%llu",
++                     static_cast<void*>(l), static_cast<unsigned long>(result), GetCurrentThreadId(),
++                     static_cast<unsigned long long>(GetTickCount64()));
++            hr->store(result, std::memory_order_relaxed);
++        }
++    });
++    // With the policy off, a tail left from before it was turned off names nothing (the teardown replayed it).
++    Replay* replay = l->h.device->replay;
++    const uint64_t tail = replay ? l->replay_tail.load(std::memory_order_relaxed) : 0;
++    const HRESULT hr = l->close_hr.load(std::memory_order_relaxed);
++    if (FAILED(hr)) {
++        l->h.device->report_list(l->rt, hr);
++        if (!tail) return;
++    }
++    l->recording = false;
++    if (tail) {
++        // The list is complete: its worker need not wait for a later publish to replay it.
++        wake_for(replay, tail);
++        if (auto* p = l->pool ? record_of<CommandPoolRecord>(l->pool, Tag::CommandPool, l->h.device) : nullptr)
++            p->closing[(tail >> 56) - 1].store(tail & kReplayPositionMask, std::memory_order_relaxed);
++    }
++    if (l->pool) leave_pool(l);
++}
++
++void APIENTRY reset_list(D3D12DDI_HCOMMANDLIST h, const D3D12DDIARG_RESETCOMMANDLIST_0040* args) {
++    CommandListRecord* l = list_of(h, "ResetCommandList");
++    if (!l) return;
++    const HRESULT closed = drain_list(l, Drain::Reset);
++    // D3D12 Close failures permanently invalidate that list (CPUEfficiency, Runtime Validation for Reset).
++    // A successful Close still permits the normal Reset below; this is not a device-wide latch.
++    if (FAILED(closed)) {
++        log_line("BC250-HANGDIAG reset_previous_close_failed list=%p hr=%08lx tid=%lu ms=%llu",
++                 static_cast<void*>(l), static_cast<unsigned long>(closed), GetCurrentThreadId(),
++                 static_cast<unsigned long long>(GetTickCount64()));
++        return l->h.device->report_list(l->rt, closed);
++    }
++    DeviceContext* c = l->h.device;
++    auto* r = args ? record_of<CommandRecorderRecord>(args->hDrvCommandRecorder.pDrvPrivate, Tag::CommandRecorder, c)
++                   : nullptr;
++    // The pool may have been destroyed since it became the target: its record is poisoned then.
++    CommandPoolRecord* p = r ? record_of<CommandPoolRecord>(r->pool, Tag::CommandPool, c) : nullptr;
++    if (!p) {
++        log_line("BC250-HANGDIAG reset_missing_pool list=%p tid=%lu ms=%llu",
++                 static_cast<void*>(l), GetCurrentThreadId(),
++                 static_cast<unsigned long long>(GetTickCount64()));
++        c->report_list(l->rt, E_INVALIDARG);
++        return;
++    }
++    drain_closes(c, p->closing);                // another list's pending Close still reaches the allocator
++    ID3D12CommandAllocator*& a = p->allocators[l->type];
++    if (!a) {
++        HRESULT hr = c->device->CreateCommandAllocator(l->type, __uuidof(ID3D12CommandAllocator),
++                                                       reinterpret_cast<void**>(&a));
++        if (FAILED(hr)) {
++            log_line("BC250-HANGDIAG reset_allocator_failed list=%p hr=%08lx tid=%lu ms=%llu",
++                     static_cast<void*>(l), static_cast<unsigned long>(hr), GetCurrentThreadId(),
++                     static_cast<unsigned long long>(GetTickCount64()));
++            a = nullptr;
++            c->report_list(l->rt, hr);
++            return;
++        }
++    }
++    HRESULT hr = l->list()->Reset(a, nullptr);
++    if (FAILED(hr)) {
++        log_line("BC250-HANGDIAG engine_reset_failed list=%p hr=%08lx tid=%lu ms=%llu",
++                 static_cast<void*>(l), static_cast<unsigned long>(hr), GetCurrentThreadId(),
++                 static_cast<unsigned long long>(GetTickCount64()));
++        c->report_list(l->rt, hr);
++        return;
++    }
++    if (l->pool) leave_pool(l);                 // a Reset without a Close: the list leaves its earlier pool
++    l->root_signatures[0] = l->root_signatures[1] = nullptr;   // the engine's Reset unbound them
++    // BD-133: the engine's Reset dropped the list's commands, a Present copy among them, so the list carries no ticket
++    // any more. A ticket that was never executed removes the device here (present-copy-sync.h, rule D). A Reset that
++    // failed above keeps the ticket: the old commands are still there.
++    l->present_copy.release();
++    l->recording = true;
++    l->pool = p;
++    p->open_lists.fetch_add(1, std::memory_order_release);
++}
++
