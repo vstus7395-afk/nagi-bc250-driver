@@ -1,7 +1,10 @@
 diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-ddi/commands.cpp
 --- a/driver/umd/d3d12/engine-ddi/commands.cpp
 +++ b/driver/umd/d3d12/engine-ddi/commands.cpp
-@@ -201,70 +201,98 @@
+@@ -198,76 +198,104 @@
+ // from the Close. The engine Close reaches the list's allocator, so the pool keeps where the entry ends (closing) for
+ // its reset and for a Reset into it. Made here (policy off, a thread without a ring), the Close reports its own
+ // failure, and a list whose Close failed stays what it was.
 -void APIENTRY close_list(D3D12DDI_HCOMMANDLIST h) {
 -    CommandListRecord* l = list_of(h, "CloseCommandList");
 -    if (!l) return;
@@ -170,3 +173,6 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +    p->open_lists.fetch_add(1, std::memory_order_release);
 +}
 +
+ // ---- List state the runtime sets on every list ---------------------------------------------------------------------
+ // The runtime writes default state into a list it has reset. SetPredication was seen there; the others are
+ // answered ahead of need. Each forwards to the engine list, which owns the feature check. Forwarding is
