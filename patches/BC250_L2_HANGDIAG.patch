@@ -227,9 +227,9 @@ diff --git a/driver/umd/d3d12/engine-ddi/context.cpp b/driver/umd/d3d12/engine-d
          return E_INVALIDARG;
      if (!hooks_valid(info->hooks, info->memory_mode)) return E_INVALIDARG;
  
--auto* c = make_new<DeviceContext>();
+-    auto* c = make_new<DeviceContext>();
 -    if (!c) return E_OUTOFMEMORY;
-+auto* c = make_new<DeviceContext>();
++    auto* c = make_new<DeviceContext>();
 +    if (!c) return E_OUTOFMEMORY;
 +    log_hangdiag("channel_ready engine_abi=0x%x", static_cast<unsigned>(f.AbiVersion));
      c->device = info->engine_device;
@@ -242,10 +242,10 @@ diff --git a/driver/umd/d3d12/engine-ddi/descriptors.cpp b/driver/umd/d3d12/engi
      desc.Flags = (args->Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
                                                                                : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
      ID3D12DescriptorHeap* heap = nullptr;
--HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
+-    HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
 -    if (FAILED(hr)) return hr;
 -    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
-+HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
++    HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
 +    if (FAILED(hr)) {
 +        log_hangdiag("descriptor_heap_failed type=%u count=%u ddi_flags=0x%x gpu_flags=0x%x hr=%08lx",
 +                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
