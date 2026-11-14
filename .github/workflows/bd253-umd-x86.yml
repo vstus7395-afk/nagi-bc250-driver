@@ -7,6 +7,7 @@ on:
       - fix/shared-resize-layout-20261111
       - diagnostics/l2-mode-switch-20261112
       - diagnostics/l2-hangdiag-release-20261114
+      - diagnostics/l2-heap-lifetime-20261114
     paths:
       - patches/NAGI_GDI1_shared_open_fix.patch
       - patches/BC250_L2_HANGDIAG.patch
