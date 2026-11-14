@@ -1,0 +1,309 @@
+diff --git a/driver/umd/d3d12/allocation-diag-policy.h b/driver/umd/d3d12/allocation-diag-policy.h
+new file mode 100644
+--- /dev/null
++++ b/driver/umd/d3d12/allocation-diag-policy.h
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include <atomic>
++#include <cstdint>
++
++namespace bc250_allocdiag {
++// One independent, renewing quota per event category. No allocation or locks.
++class Budget {
++    std::atomic<std::uint64_t> state_{0};
++public:
++    // 1: event, 2: one suppression marker, 0: skip. The caller supplies monotonic minutes.
++    unsigned take(std::uint32_t minute, unsigned limit) noexcept {
++        auto old = state_.load(std::memory_order_relaxed);
++        for (;;) {
++            const auto epoch = static_cast<std::uint32_t>(old >> 32);
++            // A delayed thread must not reset a newer epoch back to an older one.
++            const auto effective = minute > epoch ? minute : epoch;
++            const auto count = effective != epoch ? 0u : static_cast<std::uint32_t>(old);
++            if (count > limit) return 0;
++            const auto next = (std::uint64_t(effective) << 32) | (count + 1u);
++            if (state_.compare_exchange_weak(old, next, std::memory_order_relaxed))
++                return count < limit ? 1u : 2u;
++        }
++    }
++};
++// Only a loss already latched by the shell changes an allocation failure.
++// Ordinary OOM and other original results retain their existing semantics.
++constexpr std::int32_t descriptor_failure(std::int32_t original, bool lost) noexcept {
++    return lost ? static_cast<std::int32_t>(0x88760870u) : original;
++}
++}
+diff --git a/driver/umd/d3d12/allocation-diag.h b/driver/umd/d3d12/allocation-diag.h
+new file mode 100644
+--- /dev/null
++++ b/driver/umd/d3d12/allocation-diag.h
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include "allocation-diag-policy.h"
++#include <windows.h>
++#include <cstdarg>
++#include <cstdio>
++#include <limits>
++
++namespace bc250_allocdiag {
++enum class Channel : unsigned { Command, Descriptor, Resource, Hosted, Snapshot, Begin, Count };
++inline Budget budgets[static_cast<unsigned>(Channel::Count)];
++inline std::atomic<unsigned long long> sequence{0};
++inline thread_local unsigned long long request = 0;
++class Request {
++    unsigned long long previous_ = request;
++public:
++    Request() noexcept { request = sequence.fetch_add(1, std::memory_order_relaxed) + 1; }
++    ~Request() { request = previous_; }
++    Request(const Request&) = delete;
++    Request& operator=(const Request&) = delete;
++};
++inline void emitv(Channel channel, const char* format, va_list args) noexcept {
++    const auto decision = budgets[static_cast<unsigned>(channel)].take(
++        static_cast<std::uint32_t>(GetTickCount64() / 60000), 64);
++    if (!decision) return;
++    char text[640]{}, line[832]{};
++    if (decision == 2) std::snprintf(text, sizeof(text), "channel=%u suppressed_until_next_minute limit=64", unsigned(channel));
++    else std::vsnprintf(text, sizeof(text), format, args);
++    LARGE_INTEGER now{};
++    QueryPerformanceCounter(&now);
++    std::snprintf(line, sizeof(line), "BC250-ALLOCDIAG v=2 pid=%lu tid=%lu qpc=%lld request=%llu %s\n",
++        GetCurrentProcessId(), GetCurrentThreadId(), now.QuadPart, request, text);
++    OutputDebugStringA(line);
++}
++inline void emit(Channel channel, const char* format, ...) noexcept {
++    va_list args; va_start(args, format); emitv(channel, format, args); va_end(args);
++}
++// At most one process VA walk per minute, only after a failed create. These
++// observations do not decide whether an allocation is legal or whether to retry.
++inline void memory_snapshot() noexcept {
++    static Budget samples;
++    if (samples.take(static_cast<std::uint32_t>(GetTickCount64() / 60000), 1) != 1) return;
++    MEMORYSTATUSEX memory{}; memory.dwLength = sizeof(memory);
++    const BOOL valid = GlobalMemoryStatusEx(&memory);
++    SYSTEM_INFO info{}; GetSystemInfo(&info);
++    auto address = reinterpret_cast<std::uintptr_t>(info.lpMinimumApplicationAddress);
++    const auto last = reinterpret_cast<std::uintptr_t>(info.lpMaximumApplicationAddress);
++    unsigned long long free_bytes = 0, largest = 0, committed = 0, reserved = 0;
++    bool complete = false;
++    while (address <= last) {
++        MEMORY_BASIC_INFORMATION region{};
++        if (!VirtualQuery(reinterpret_cast<void*>(address), &region, sizeof(region))) break;
++        const auto bytes = static_cast<unsigned long long>(region.RegionSize);
++        if (region.State == MEM_FREE) { free_bytes += bytes; if (bytes > largest) largest = bytes; }
++        else if (region.State == MEM_COMMIT) committed += bytes;
++        else if (region.State == MEM_RESERVE) reserved += bytes;
++        const auto base = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
++        if (!region.RegionSize) break;
++        if (region.RegionSize > (std::numeric_limits<std::uintptr_t>::max)() - base) { complete = true; break; }
++        const auto next = base + region.RegionSize;
++        if (next <= address) break;
++        if (next > last) { complete = true; break; }
++        address = next;
++    }
++    emit(Channel::Snapshot, "cpu_memory valid=%u va_complete=%u pointer_bits=%u physical_available=%llu "
++        "commit_available=%llu virtual_available=%llu va_free=%llu va_largest_free=%llu va_committed=%llu va_reserved=%llu",
++        unsigned(valid != FALSE), unsigned(complete), unsigned(sizeof(void*) * 8), memory.ullAvailPhys,
++        memory.ullAvailPageFile, memory.ullAvailVirtual, free_bytes, largest, committed, reserved);
++}
++}
+diff --git a/driver/umd/d3d12/engine-ddi/context.cpp b/driver/umd/d3d12/engine-ddi/context.cpp
+--- a/driver/umd/d3d12/engine-ddi/context.cpp
++++ b/driver/umd/d3d12/engine-ddi/context.cpp
+@@ -8,6 +8,7 @@
+ #include <tuple>
+ #include <type_traits>
+ #include "../stdio-log.h"
++#include "../allocation-diag.h"
+ 
+ namespace engine_ddi {
+ 
+@@ -34,8 +35,6 @@
+ // application may now probe by creating and tolerating the failure in a loop; each line costs a
+ // raised-and-swallowed exception and the DBWIN mutex, so the lines are bounded like log_line's.
+ std::atomic<int> refusal_budget{4096};
+-// Independent failure-only diagnostic quota; never shared with common shared-surface refusals.
+-std::atomic<unsigned> hangdiag_events{0};
+ #ifdef AMDGPU_WDDM_ENGINE_DDI_HARNESS
+ std::atomic<LogObserver> log_observer{nullptr};
+ std::atomic<void*> log_observer_user{nullptr};
+@@ -77,25 +76,10 @@
+ // Diagnostics compiled into the release UMD: the usual log_line debugger sink
+ // is deliberately disabled outside lab flavour. Emit only bounded rare events.
+ void log_hangdiag(const char* format, ...) noexcept {
+-    const unsigned index = hangdiag_events.fetch_add(1, std::memory_order_relaxed);
+-    if (index >= 512) {
+-        if (index == 512)
+-            OutputDebugStringA("amdgpu_wddm_d3d12 BC250-HANGDIAG further events suppressed (512 per process)\n");
+-        return;
+-    }
+-    char text[384]{};
+     va_list args;
+     va_start(args, format);
+-    std::vsnprintf(text, sizeof(text), format, args);
++    bc250_allocdiag::emitv(bc250_allocdiag::Channel::Command, format, args);
+     va_end(args);
+-    LARGE_INTEGER now{};
+-    QueryPerformanceCounter(&now);
+-    char line[576]{};
+-    std::snprintf(line, sizeof(line), "amdgpu_wddm_d3d12 BC250-HANGDIAG pid=%lu tid=%lu qpc=%lld %s\n",
+-                  static_cast<unsigned long>(GetCurrentProcessId()),
+-                  static_cast<unsigned long>(GetCurrentThreadId()),
+-                  static_cast<long long>(now.QuadPart), text);
+-    OutputDebugStringA(line);
+ }
+ 
+ // ---- Release sequence ------------------------------------------------------------------------------------------
+diff --git a/driver/umd/d3d12/engine-ddi/ddi-modern-core.h b/driver/umd/d3d12/engine-ddi/ddi-modern-core.h
+--- a/driver/umd/d3d12/engine-ddi/ddi-modern-core.h
++++ b/driver/umd/d3d12/engine-ddi/ddi-modern-core.h
+@@ -2,6 +2,7 @@
+ // Typed adapters for WDK 10.0.28000.0 CORE 0095-0119. No table or argument
+ // prefix is treated as a different C type. Optional features remain unadvertised.
+ #pragma once
++#include "../allocation-diag.h"
+ #include <d3d12umddi.h>
+ #include "../ddi-entry.h" // the shell's AllowOutOfMemory contract
+ #include <cmath>
+@@ -41,10 +42,9 @@
+     if (FAILED(raw)) {
+         // Preserve the actual refusal for diagnosis without reporting an extra
+         // device error: this creation callback has its own admitted HRESULT.
+-        char line[160];
+-        sprintf_s(line, "modern CORE %s: hr %08lx, admitted %08lx\n", slot,
+-                  static_cast<unsigned long>(raw), static_cast<unsigned long>(admitted));
+-        OutputDebugStringA(line);
++        bc250_allocdiag::emit(bc250_allocdiag::Channel::Resource, "modern_CORE slot=%s raw_hr=%08lx admitted_hr=%08lx",
++            slot, static_cast<unsigned long>(raw), static_cast<unsigned long>(admitted));
++        bc250_allocdiag::memory_snapshot();
+     }
+     return admitted;
+ }
+@@ -222,6 +222,7 @@
+     template<class Resource> static HRESULT APIENTRY resource_create(
+         D3D12DDI_HDEVICE h, const D3D12DDIARG_CREATEHEAP_0001* heap, D3D12DDI_HHEAP hh, D3D12DDI_HRTRESOURCE rt,
+         const Resource* s, const D3D12DDI_CLEAR_VALUES* clear, D3D12DDI_HPROTECTEDRESOURCESESSION_0030 session, D3D12DDI_HRESOURCE o) {
++        bc250_allocdiag::Request request_scope;
+         D3D12DDIARG_CREATERESOURCE_0088 d{};
+         if (s && !resource(*s, d)) return creation_status("CreateHeapAndResource", E_NOTIMPL);
+         // Forward through the composed shell callback, including its owner scope.
+diff --git a/driver/umd/d3d12/engine-ddi/descriptors.cpp b/driver/umd/d3d12/engine-ddi/descriptors.cpp
+--- a/driver/umd/d3d12/engine-ddi/descriptors.cpp
++++ b/driver/umd/d3d12/engine-ddi/descriptors.cpp
+@@ -8,6 +8,7 @@
+ #include "internal.h"
+ #include "replay.h"
+ #include "byte-offset-view.h"
++#include "../allocation-diag.h"
+ 
+ namespace engine_ddi {
+ 
+@@ -41,19 +42,31 @@
+     if (args->Type >= D3D12DDI_DESCRIPTOR_HEAP_TYPE_NUM_TYPES || !args->NumDescriptors || args->NodeMask > 1 ||
+         (args->Flags & ~(D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE | D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)))
+         return E_INVALIDARG;
++    bc250_allocdiag::Request request_scope;
++    if (c->lost()) {
++        bc250_allocdiag::emit(bc250_allocdiag::Channel::Descriptor, "descriptor_rejected_device_lost count=%u", args->NumDescriptors);
++        return kDriverDeviceRemoved;
++    }
+     D3D12_DESCRIPTOR_HEAP_DESC desc{};
+     desc.Type = static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(args->Type);
+     desc.NumDescriptors = args->NumDescriptors;
+     desc.Flags = (args->Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+                                                                               : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+     ID3D12DescriptorHeap* heap = nullptr;
++    if (desc.NumDescriptors >= 1000000)
++        bc250_allocdiag::emit(bc250_allocdiag::Channel::Begin, "descriptor_begin type=%u count=%u flags=0x%x",
++            unsigned(desc.Type), desc.NumDescriptors, unsigned(desc.Flags));
+     HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
+     if (FAILED(hr)) {
+-        log_hangdiag("descriptor_heap_failed type=%u count=%u ddi_flags=0x%x gpu_flags=0x%x hr=%08lx",
+-                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
+-                     static_cast<unsigned>(args->Flags), static_cast<unsigned>(desc.Flags),
+-                     static_cast<unsigned long>(hr));
+-        return hr;
++        const bool lost = c->lost();
++        const HRESULT result = bc250_allocdiag::descriptor_failure(hr, lost);
++        static_assert(bc250_allocdiag::descriptor_failure(E_OUTOFMEMORY, true) == kDriverDeviceRemoved);
++        bc250_allocdiag::emit(bc250_allocdiag::Channel::Descriptor,
++            "descriptor_failed type=%u count=%u ddi_flags=0x%x flags=0x%x raw_hr=%08lx returned_hr=%08lx lost=%u",
++            unsigned(desc.Type), desc.NumDescriptors, unsigned(args->Flags), unsigned(desc.Flags),
++            static_cast<unsigned long>(hr), static_cast<unsigned long>(result), unsigned(lost));
++        bc250_allocdiag::memory_snapshot();
++        return result;
+     }
+     // A single positive large-heap observation helps distinguish initial creation from rollover failures.
+     static LogOnce first_large_shader_visible_heap;
+diff --git a/driver/umd/d3d12/engine-ddi/resources.cpp b/driver/umd/d3d12/engine-ddi/resources.cpp
+--- a/driver/umd/d3d12/engine-ddi/resources.cpp
++++ b/driver/umd/d3d12/engine-ddi/resources.cpp
+@@ -3,6 +3,7 @@
+ // their tile slots are in tiles.cpp), resource_allocation, object_allocation, and the list slots that move data
+ // between resources (L10, L13, L17).
+ #include "internal.h"
++#include "../allocation-diag.h"
+ #include "replay.h"
+ #include "format-list.h"
+ #include "tight-alignment.h"
+@@ -870,7 +871,8 @@
+         // shape the runtime uses for which API call is otherwise unlogged (engine-ddi.h).
+         const D3D12DDIARG_CREATEHEAP_0001 h = heap_desc ? *heap_desc : D3D12DDIARG_CREATEHEAP_0001{};
+         const D3D12DDIARG_CREATERESOURCE_0088* r = res_desc;
+-        log_refusal("CreateHeapAndResource: %08lx reported as %08lx; heap description %s (%llu bytes, "
++        bc250_allocdiag::memory_snapshot();
++        bc250_allocdiag::emit(bc250_allocdiag::Channel::Resource, "CreateHeapAndResource: %08lx reported as %08lx; heap description %s (%llu bytes, "
+                     "alignment %llu, flags 0x%x, "
+                     "pool %u, cpu page %u), heap handle %s; resource description %s (type %u, %llux%u, depth %u, "
+                     "mips %u, format %u, samples %u, layout %u, flags 0x%x, castable %u), base resource %s, "
+diff --git a/driver/umd/d3d12/hosted-dispatch.cpp b/driver/umd/d3d12/hosted-dispatch.cpp
+--- a/driver/umd/d3d12/hosted-dispatch.cpp
++++ b/driver/umd/d3d12/hosted-dispatch.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include <cstdio>
+ #include "ddi-trace.h"
++#include "allocation-diag.h"
+ 
+ namespace native12 {
+ namespace {
+@@ -897,7 +898,36 @@
+         char name[40];std::snprintf(name,sizeof(name),"replay-worker-op:%u",op);
+         ddi_failure_note(name,E_INVALIDARG);return static_cast<int32_t>(0xc000000du);
+     }
+-    return self->complete_operation(op,self->operation(op,argument));
++    const HRESULT hr = self->operation(op,argument);
++    if (FAILED(hr) && hr != E_PENDING) {
++        const char* stage = "other";
++        switch (op) {
++        case BC250_HOST_CreateAllocation2: stage="CreateAllocation2"; break;
++        case BC250_HOST_MapGpuVirtualAddress: stage="MapGpuVirtualAddress"; break;
++        case BC250_HOST_ReserveGpuVirtualAddress: stage="ReserveGpuVirtualAddress"; break;
++        case BC250_HOST_MakeResident: stage="MakeResident"; break;
++        case BC250_HOST_WaitForSynchronizationObjectFromCpu: stage="WaitFromCpu"; break;
++        case BC250_HOST_Lock2: stage="Lock2"; break;
++        case BC250_HOST_DestroyAllocation2: stage="DestroyAllocation2"; break;
++        default: break;
++        }
++        bc250_allocdiag::emit(bc250_allocdiag::Channel::Hosted,
++            "hosted_failed stage=%s op=%u raw_hr=%08lx", stage, op, static_cast<unsigned long>(hr));
++        if (op == BC250_HOST_MapGpuVirtualAddress) {
++            const auto& a=*static_cast<D3DDDI_MAPGPUVIRTUALADDRESS*>(argument);
++            bc250_allocdiag::emit(bc250_allocdiag::Channel::Hosted,
++                "map_failed pages=%llu minimum=%llu maximum=%llu base=%llu",
++                static_cast<unsigned long long>(a.SizeInPages), static_cast<unsigned long long>(a.MinimumAddress),
++                static_cast<unsigned long long>(a.MaximumAddress), static_cast<unsigned long long>(a.BaseAddress));
++        }
++        if (op == BC250_HOST_MakeResident) {
++            const auto& a=*static_cast<D3DDDI_MAKERESIDENT*>(argument);
++            bc250_allocdiag::emit(bc250_allocdiag::Channel::Hosted,
++                "resident_failed allocations=%u bytes_to_trim=%llu flags=0x%x", a.NumAllocations,
++                static_cast<unsigned long long>(a.NumBytesToTrim), a.Flags.Value);
++        }
++    }
++    return self->complete_operation(op,hr);
+ }
+ int32_t HostedDispatch::complete_operation(uint32_t op,HRESULT hr) noexcept {
+     if(!active_.load(std::memory_order_acquire) || !runtime_.handle || !domain_.entered())

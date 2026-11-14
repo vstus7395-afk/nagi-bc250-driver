@@ -7,9 +7,12 @@ on:
       - fix/shared-resize-layout-20261111
       - diagnostics/l2-mode-switch-20261112
       - diagnostics/l2-hangdiag-release-20261114
+      - diagnostics/l2-allocation-stage-20261114
     paths:
       - patches/NAGI_GDI1_shared_open_fix.patch
       - patches/BC250_L2_HANGDIAG.patch
+      - patches/BC250_ALLOCATION_DIAG_V2.patch
+      - tools/test-allocdiag-policy.cpp
       - .github/workflows/bd253-umd-x86.yml
   workflow_dispatch:
 
@@ -92,11 +95,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Hang diagnostic patch check failed: $LASTEXITCODE" }
           git -C upstream apply --recount $diag
           if ($LASTEXITCODE -ne 0) { throw "Hang diagnostic patch application failed: $LASTEXITCODE" }
+          $alloc = Join-Path $env:GITHUB_WORKSPACE 'patches\BC250_ALLOCATION_DIAG_V2.patch'
+          [IO.File]::WriteAllText($alloc, [IO.File]::ReadAllText($alloc).Replace("`r`n", "`n"))
+          git -C upstream apply --check $alloc
+          if ($LASTEXITCODE -ne 0) { throw 'Allocation diagnostic patch check failed' }
+          git -C upstream apply $alloc
+          if ($LASTEXITCODE -ne 0) { throw 'Allocation diagnostic patch application failed' }
           git -C upstream diff --check
           if ($LASTEXITCODE -ne 0) { throw "Whitespace check failed: $LASTEXITCODE" }
-          $changed = @(git -C upstream diff --name-only)
+          $changed = @(git -C upstream diff --name-only; git -C upstream ls-files --others --exclude-standard)
           Write-Host ($changed -join "`n")
-          if ($changed.Count -ne 7) { throw "Expected exactly 7 patched source files, got $($changed.Count)" }
+          if ($changed.Count -ne 11) { throw "Expected exactly 11 patched source files, got $($changed.Count)" }
           git -C upstream diff --stat
 
       - name: Download pinned Windows SDK, WDK and D3D12 headers
@@ -215,22 +224,45 @@ jobs:
           & $dumpbin.FullName /headers $dll | Select-String -Pattern 'machine|14C|8664'
           if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the built UMD DLL' }
 
-      - name: Stage reversible installer beside the x86 UMD
+      - name: Test x86 diagnostics policy and shared surface contract
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $source = Join-Path $env:GITHUB_WORKSPACE 'tools\install-bd253-test-umd.ps1'
-          $destination = Join-Path $env:GITHUB_WORKSPACE 'out\d3d12-umd-x86\install-bd253-test-umd.ps1'
-          if (-not (Test-Path -LiteralPath $source)) { throw 'Reversible installer script is missing' }
-          Copy-Item -LiteralPath $source -Destination $destination -Force
+          $root = $env:GITHUB_WORKSPACE
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars32.bat'
+          if (-not (Test-Path $vcvars)) { throw 'Missing x86 compiler environment' }
+          $script = Join-Path $env:RUNNER_TEMP 'allocdiag-tests.cmd'
+          $lines = @(
+            '@echo off',
+            ('call "{0}" >nul' -f $vcvars),
+            'if errorlevel 1 exit /b 1',
+            ('cl /nologo /EHsc /std:c++17 /I"{0}\upstream\driver\umd\d3d12" "{0}\tools\test-allocdiag-policy.cpp" /Fe:allocdiag-policy-test.exe' -f $root),
+            'if errorlevel 1 exit /b 1',
+            'allocdiag-policy-test.exe',
+            'if errorlevel 1 exit /b 1',
+            ('cl /nologo /EHsc /std:c++17 "{0}\upstream\driver\contract\test\shared-surface-test.cpp" /Fe:shared-surface-test.exe' -f $root),
+            'if errorlevel 1 exit /b 1',
+            'shared-surface-test.exe',
+            'exit /b %errorlevel%'
+          )
+          [IO.File]::WriteAllLines($script, $lines, [Text.Encoding]::ASCII)
+          & cmd.exe /d /c $script
+          if ($LASTEXITCODE -ne 0) { throw 'x86 contract tests failed' }
+          Copy-Item patches\BC250_ALLOCATION_DIAG_V2.patch out\d3d12-umd-x86\
+          Copy-Item docs\ALLOCATION-DIAG-V2.md out\d3d12-umd-x86\
 
       - name: Upload 32-bit D3D12 UMD test build
         uses: actions/upload-artifact@v4
         with:
-          name: nagi-tester37-hangdiag-umd-x86-${{ github.run_id }}-${{ github.sha }}
+          name: nagi-tester37-allocdiag-v2-umd-x86-${{ github.run_id }}-${{ github.sha }}
           path: |
             out/d3d12-umd-x86/amdgpu_wddm_d3d12.dll
-            out/d3d12-umd-x86/install-bd253-test-umd.ps1
+            out/d3d12-umd-x86/amdgpu_wddm_d3d12.pdb
+            out/d3d12-umd-x86/amdgpu_wddm_d3d12.map
+            out/d3d12-umd-x86/BC250_ALLOCATION_DIAG_V2.patch
+            out/d3d12-umd-x86/ALLOCATION-DIAG-V2.md
             out/d3d12-umd-x86/engine-ddi/engine-ddi.lib
             out/d3d12-umd-x86/engine-ddi/compiler.json
           if-no-files-found: error
