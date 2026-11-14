@@ -238,32 +238,79 @@ diff --git a/driver/umd/d3d12/engine-ddi/context.cpp b/driver/umd/d3d12/engine-d
 diff --git a/driver/umd/d3d12/engine-ddi/descriptors.cpp b/driver/umd/d3d12/engine-ddi/descriptors.cpp
 --- a/driver/umd/d3d12/engine-ddi/descriptors.cpp
 +++ b/driver/umd/d3d12/engine-ddi/descriptors.cpp
-@@ -47,9 +47,22 @@
-     desc.Flags = (args->Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+@@ -30,6 +30,16 @@
+               "sampler address modes");
+ 
+ namespace {
++// A counter of *live DDI objects*, not Vulkan resident bytes. Deliberately diagnostic only.
++std::atomic<uint64_t> large_heaps_created{0};
++std::atomic<uint64_t> large_heaps_destroyed{0};
++std::atomic<uint64_t> large_heaps_live{0};
++std::atomic<uint64_t> large_heaps_peak{0};
++
++bool is_large_shader_heap(D3D12_DESCRIPTOR_HEAP_TYPE type, UINT count, bool shader_visible) noexcept {
++    return type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && count >= 16384 && shader_visible;
++}
++
+ SIZE_T APIENTRY calc_heap(D3D12DDI_HDEVICE, const D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001*) {
+     return sizeof(DescriptorHeapRecord);
+ }
+@@ -48,11 +58,37 @@
                                                                                : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
      ID3D12DescriptorHeap* heap = nullptr;
--    HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
+     HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
 -    if (FAILED(hr)) return hr;
--    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
-+    HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
 +    if (FAILED(hr)) {
-+        log_hangdiag("descriptor_heap_failed type=%u count=%u ddi_flags=0x%x gpu_flags=0x%x hr=%08lx",
++        log_hangdiag("descriptor_heap_failed type=%u count=%u ddi_flags=0x%x gpu_flags=0x%x hr=%08lx live=%llu made=%llu freed=%llu peak=%llu",
 +                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
 +                     static_cast<unsigned>(args->Flags), static_cast<unsigned>(desc.Flags),
-+                     static_cast<unsigned long>(hr));
++                     static_cast<unsigned long>(hr),
++                     static_cast<unsigned long long>(large_heaps_live.load(std::memory_order_relaxed)),
++                     static_cast<unsigned long long>(large_heaps_created.load(std::memory_order_relaxed)),
++                     static_cast<unsigned long long>(large_heaps_destroyed.load(std::memory_order_relaxed)),
++                     static_cast<unsigned long long>(large_heaps_peak.load(std::memory_order_relaxed)));
 +        return hr;
 +    }
-+    // A single positive large-heap observation helps distinguish initial creation from rollover failures.
 +    static LogOnce first_large_shader_visible_heap;
 +    if ((desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) && desc.NumDescriptors >= 16384 &&
 +        first_large_shader_visible_heap.first())
 +        log_hangdiag("descriptor_heap_large_ok type=%u count=%u flags=0x%x",
 +                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
 +                     static_cast<unsigned>(desc.Flags));
-+    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
+     D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
      if (desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) gpu = heap->GetGPUDescriptorHandleForHeapStart();
      new (h.pDrvPrivate) DescriptorHeapRecord{{Tag::DescriptorHeap, 0, heap, c}, desc.Type, desc.NumDescriptors,
                                               heap->GetCPUDescriptorHandleForHeapStart(), gpu};
++    if (is_large_shader_heap(desc.Type, desc.NumDescriptors,
++                             (desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) != 0)) {
++        const uint64_t live = large_heaps_live.fetch_add(1, std::memory_order_relaxed) + 1;
++        const uint64_t made = large_heaps_created.fetch_add(1, std::memory_order_relaxed) + 1;
++        uint64_t peak = large_heaps_peak.load(std::memory_order_relaxed);
++        while (peak < live && !large_heaps_peak.compare_exchange_weak(peak, live, std::memory_order_relaxed)) {}
++        log_hangdiag("descriptor_heap_created type=%u count=%u live=%llu made=%llu",
++                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
++                     static_cast<unsigned long long>(live), static_cast<unsigned long long>(made));
++    }
+     c->live.fetch_add(1);
+     return S_OK;
+ }
+@@ -66,7 +102,16 @@
+         return;
+     }
+     drain_all(c, Drain::Destroy);
++    const bool large = is_large_shader_heap(r->type, r->count, r->gpu.ptr != 0);
+     release_engine(r->h);
++    if (large) {
++        const uint64_t live_before = large_heaps_live.fetch_sub(1, std::memory_order_relaxed);
++        const uint64_t freed = large_heaps_destroyed.fetch_add(1, std::memory_order_relaxed) + 1;
++        log_hangdiag("descriptor_heap_destroyed count=%u live=%llu freed=%llu",
++                     static_cast<unsigned>(r->count),
++                     static_cast<unsigned long long>(live_before - 1),
++                     static_cast<unsigned long long>(freed));
++    }
+     poison(r->h);
+     c->live.fetch_sub(1);
+ }
 diff --git a/driver/umd/d3d12/engine-ddi/internal.h b/driver/umd/d3d12/engine-ddi/internal.h
 --- a/driver/umd/d3d12/engine-ddi/internal.h
 +++ b/driver/umd/d3d12/engine-ddi/internal.h
