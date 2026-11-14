@@ -6,6 +6,7 @@ on:
       - try/d3d9on12-bare-allocation
       - fix/shared-resize-layout-20261111
       - diagnostics/l2-mode-switch-20261112
+      - diagnostics/l2-hangdiag-release-20261114
     paths:
       - patches/NAGI_GDI1_shared_open_fix.patch
       - patches/BC250_L2_HANGDIAG.patch
@@ -95,7 +96,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Whitespace check failed: $LASTEXITCODE" }
           $changed = @(git -C upstream diff --name-only)
           Write-Host ($changed -join "`n")
-          if ($changed.Count -ne 4) { throw "Expected exactly 4 patched source files, got $($changed.Count)" }
+          if ($changed.Count -ne 7) { throw "Expected exactly 7 patched source files, got $($changed.Count)" }
           git -C upstream diff --stat
 
       - name: Download pinned Windows SDK, WDK and D3D12 headers

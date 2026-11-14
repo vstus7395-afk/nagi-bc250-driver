@@ -79,12 +79,12 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +    CommandListRecord* l = list_of(h, "CloseCommandList");
 +    if (!l) return;
 +    if (!l->recording)
-+        log_line("BC250-HANGDIAG close_without_recording list=%p tid=%lu ms=%llu",
++        log_hangdiag("close_without_recording list=%p tid=%lu ms=%llu",
 +                 static_cast<void*>(l), GetCurrentThreadId(),
 +                 static_cast<unsigned long long>(GetTickCount64()));
 +    const HRESULT earlier = l->close_hr.load(std::memory_order_relaxed);
 +    if (FAILED(earlier)) {
-+        log_line("BC250-HANGDIAG close_previous_failure list=%p hr=%08lx tid=%lu ms=%llu",
++        log_hangdiag("close_previous_failure list=%p hr=%08lx tid=%lu ms=%llu",
 +                 static_cast<void*>(l), static_cast<unsigned long>(earlier), GetCurrentThreadId(),
 +                 static_cast<unsigned long long>(GetTickCount64()));
 +        return l->h.device->report_list(l->rt, earlier);
@@ -92,7 +92,7 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +    record(l, [hr = &l->close_hr, l](ID3D12GraphicsCommandList* e) noexcept {
 +        const HRESULT result = e->Close();
 +        if (FAILED(result)) {
-+            log_line("BC250-HANGDIAG engine_close_failed list=%p hr=%08lx tid=%lu ms=%llu",
++            log_hangdiag("engine_close_failed list=%p hr=%08lx tid=%lu ms=%llu",
 +                     static_cast<void*>(l), static_cast<unsigned long>(result), GetCurrentThreadId(),
 +                     static_cast<unsigned long long>(GetTickCount64()));
 +            hr->store(result, std::memory_order_relaxed);
@@ -123,7 +123,7 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +    // D3D12 Close failures permanently invalidate that list (CPUEfficiency, Runtime Validation for Reset).
 +    // A successful Close still permits the normal Reset below; this is not a device-wide latch.
 +    if (FAILED(closed)) {
-+        log_line("BC250-HANGDIAG reset_previous_close_failed list=%p hr=%08lx tid=%lu ms=%llu",
++        log_hangdiag("reset_previous_close_failed list=%p hr=%08lx tid=%lu ms=%llu",
 +                 static_cast<void*>(l), static_cast<unsigned long>(closed), GetCurrentThreadId(),
 +                 static_cast<unsigned long long>(GetTickCount64()));
 +        return l->h.device->report_list(l->rt, closed);
@@ -134,7 +134,7 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +    // The pool may have been destroyed since it became the target: its record is poisoned then.
 +    CommandPoolRecord* p = r ? record_of<CommandPoolRecord>(r->pool, Tag::CommandPool, c) : nullptr;
 +    if (!p) {
-+        log_line("BC250-HANGDIAG reset_missing_pool list=%p tid=%lu ms=%llu",
++        log_hangdiag("reset_missing_pool list=%p tid=%lu ms=%llu",
 +                 static_cast<void*>(l), GetCurrentThreadId(),
 +                 static_cast<unsigned long long>(GetTickCount64()));
 +        c->report_list(l->rt, E_INVALIDARG);
@@ -146,7 +146,7 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +        HRESULT hr = c->device->CreateCommandAllocator(l->type, __uuidof(ID3D12CommandAllocator),
 +                                                       reinterpret_cast<void**>(&a));
 +        if (FAILED(hr)) {
-+            log_line("BC250-HANGDIAG reset_allocator_failed list=%p hr=%08lx tid=%lu ms=%llu",
++            log_hangdiag("reset_allocator_failed list=%p hr=%08lx tid=%lu ms=%llu",
 +                     static_cast<void*>(l), static_cast<unsigned long>(hr), GetCurrentThreadId(),
 +                     static_cast<unsigned long long>(GetTickCount64()));
 +            a = nullptr;
@@ -156,7 +156,7 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
 +    }
 +    HRESULT hr = l->list()->Reset(a, nullptr);
 +    if (FAILED(hr)) {
-+        log_line("BC250-HANGDIAG engine_reset_failed list=%p hr=%08lx tid=%lu ms=%llu",
++        log_hangdiag("engine_reset_failed list=%p hr=%08lx tid=%lu ms=%llu",
 +                 static_cast<void*>(l), static_cast<unsigned long>(hr), GetCurrentThreadId(),
 +                 static_cast<unsigned long long>(GetTickCount64()));
 +        c->report_list(l->rt, hr);
@@ -176,3 +176,105 @@ diff --git a/driver/umd/d3d12/engine-ddi/commands.cpp b/driver/umd/d3d12/engine-
  // ---- List state the runtime sets on every list ---------------------------------------------------------------------
  // The runtime writes default state into a list it has reset. SetPredication was seen there; the others are
  // answered ahead of need. Each forwards to the engine list, which owns the feature check. Forwarding is
+diff --git a/driver/umd/d3d12/engine-ddi/context.cpp b/driver/umd/d3d12/engine-ddi/context.cpp
+--- a/driver/umd/d3d12/engine-ddi/context.cpp
++++ b/driver/umd/d3d12/engine-ddi/context.cpp
+@@ -33,7 +33,9 @@
+ // debugger record a declined object without a trace build. A refused create is survivable since BD-075, so an
+ // application may now probe by creating and tolerating the failure in a loop; each line costs a
+ // raised-and-swallowed exception and the DBWIN mutex, so the lines are bounded like log_line's.
+-std::atomic<int> refusal_budget{4096};
++std::atomic<int> refusal_budget{4096};
++// Independent failure-only diagnostic quota; never shared with common shared-surface refusals.
++std::atomic<unsigned> hangdiag_events{0};
+ #ifdef AMDGPU_WDDM_ENGINE_DDI_HARNESS
+ std::atomic<LogObserver> log_observer{nullptr};
+ std::atomic<void*> log_observer_user{nullptr};
+@@ -72,7 +74,31 @@
+     OutputDebugStringA(line);
+ }
+ 
+-// ---- Release sequence ------------------------------------------------------------------------------------------
++// Diagnostics compiled into the release UMD: the usual log_line debugger sink
++// is deliberately disabled outside lab flavour. Emit only bounded rare events.
++void log_hangdiag(const char* format, ...) noexcept {
++    const unsigned index = hangdiag_events.fetch_add(1, std::memory_order_relaxed);
++    if (index >= 512) {
++        if (index == 512)
++            OutputDebugStringA("amdgpu_wddm_d3d12 BC250-HANGDIAG further events suppressed (512 per process)\n");
++        return;
++    }
++    char text[384]{};
++    va_list args;
++    va_start(args, format);
++    std::vsnprintf(text, sizeof(text), format, args);
++    va_end(args);
++    LARGE_INTEGER now{};
++    QueryPerformanceCounter(&now);
++    char line[576]{};
++    std::snprintf(line, sizeof(line), "amdgpu_wddm_d3d12 BC250-HANGDIAG pid=%lu tid=%lu qpc=%lld %s\n",
++                  static_cast<unsigned long>(GetCurrentProcessId()),
++                  static_cast<unsigned long>(GetCurrentThreadId()),
++                  static_cast<long long>(now.QuadPart), text);
++    OutputDebugStringA(line);
++}
++
++// ---- Release sequence ------------------------------------------------------------------------------------------
+ void ReleaseQueue::add(PendingRelease* node) noexcept {
+     node->next = head_;
+     head_ = node;
+@@ -517,8 +543,9 @@
+         return E_INVALIDARG;
+     if (!hooks_valid(info->hooks, info->memory_mode)) return E_INVALIDARG;
+ 
+-auto* c = make_new<DeviceContext>();
+-    if (!c) return E_OUTOFMEMORY;
++auto* c = make_new<DeviceContext>();
++    if (!c) return E_OUTOFMEMORY;
++    log_hangdiag("channel_ready engine_abi=0x%x", static_cast<unsigned>(f.AbiVersion));
+     c->device = info->engine_device;
+     c->device->AddRef();
+     HRESULT hr = c->device->QueryInterface(__uuidof(ID3D12Device4), reinterpret_cast<void**>(&c->device4));
+diff --git a/driver/umd/d3d12/engine-ddi/descriptors.cpp b/driver/umd/d3d12/engine-ddi/descriptors.cpp
+--- a/driver/umd/d3d12/engine-ddi/descriptors.cpp
++++ b/driver/umd/d3d12/engine-ddi/descriptors.cpp
+@@ -47,9 +47,22 @@
+     desc.Flags = (args->Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+                                                                               : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+     ID3D12DescriptorHeap* heap = nullptr;
+-HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
+-    if (FAILED(hr)) return hr;
+-    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
++HRESULT hr = c->device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
++    if (FAILED(hr)) {
++        log_hangdiag("descriptor_heap_failed type=%u count=%u ddi_flags=0x%x gpu_flags=0x%x hr=%08lx",
++                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
++                     static_cast<unsigned>(args->Flags), static_cast<unsigned>(desc.Flags),
++                     static_cast<unsigned long>(hr));
++        return hr;
++    }
++    // A single positive large-heap observation helps distinguish initial creation from rollover failures.
++    static LogOnce first_large_shader_visible_heap;
++    if ((desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) && desc.NumDescriptors >= 16384 &&
++        first_large_shader_visible_heap.first())
++        log_hangdiag("descriptor_heap_large_ok type=%u count=%u flags=0x%x",
++                     static_cast<unsigned>(desc.Type), static_cast<unsigned>(desc.NumDescriptors),
++                     static_cast<unsigned>(desc.Flags));
++    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
+     if (desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) gpu = heap->GetGPUDescriptorHandleForHeapStart();
+     new (h.pDrvPrivate) DescriptorHeapRecord{{Tag::DescriptorHeap, 0, heap, c}, desc.Type, desc.NumDescriptors,
+                                              heap->GetCPUDescriptorHandleForHeapStart(), gpu};
+diff --git a/driver/umd/d3d12/engine-ddi/internal.h b/driver/umd/d3d12/engine-ddi/internal.h
+--- a/driver/umd/d3d12/engine-ddi/internal.h
++++ b/driver/umd/d3d12/engine-ddi/internal.h
+@@ -16,7 +16,9 @@
+ // One line on the AMDGPU_WDDM_LOG sink (stdio-log.h: nothing, stderr or a file), prefixed "engine-ddi: ".
+ void log_line(const char* format, ...) noexcept;
+ // A refusal: the same line, also on the debugger's output. A game's stderr goes nowhere, and refusals are rare.
+-void log_refusal(const char* format, ...) noexcept;
++void log_refusal(const char* format, ...) noexcept;
++// Rare diagnostics with a dedicated quota and release-mode debugger output.
++void log_hangdiag(const char* format, ...) noexcept;
+ 
+ // Diagnostic lines written once a process, through log_refusal. first() is true for its first caller only; once
+ // it was, done() and first() cost one relaxed load. Constant-initialized: a namespace-scope instance needs no guard.
