@@ -76,3 +76,4 @@ try {
     if ($originalFileAcl) { Set-Acl -LiteralPath $target -AclObject $originalFileAcl }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
+exit 0

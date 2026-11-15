@@ -10,6 +10,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   installer:
     runs-on: windows-2022
@@ -19,3 +20,25 @@ jobs:
       - name: Verify protected-file copy and rollback in Windows PowerShell 5.1
         shell: powershell
         run: .\tools\test-bd253-installer.ps1
+      - name: Download verified x86 DLL
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 43640708853
+          name: nagi-tester37-allocdiag-v2-umd-x86-43640708853-8aebed3248982eed2951e529c84dfda53bd268f0
+          path: built
+      - name: Package installer with hash-pinned DLL
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = 'built\amdgpu_wddm_d3d12.dll'
+          if ((Get-FileHash $dll -Algorithm SHA256).Hash -ne '6aaafba4d026b4fce8df9946221847df806da4e06f107ec46fcf14cffb25e282') { throw 'Wrong DLL' }
+          New-Item -ItemType Directory package | Out-Null
+          Copy-Item $dll package\
+          Copy-Item tools\install-bd253-test-umd.ps1 package\
+          Copy-Item patches\BC250_ALLOCATION_DIAG_V2.patch package\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BC250-allocdiag-v2-install
+          path: package/*
+          if-no-files-found: error

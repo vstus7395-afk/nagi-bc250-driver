@@ -133,3 +133,4 @@ try {
     if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x14c) { throw 'Source is not an x86 PE DLL.' }
 } finally { $reader.Dispose() }
 Install-Bd253File $source $target $backupRoot
+exit 0
