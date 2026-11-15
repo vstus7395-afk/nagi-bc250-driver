@@ -1,0 +1,32 @@
+name: BC250 smaller descriptor heaps experiment
+on:
+  push:
+    branches: [experiment/l2-small-descriptor-heaps]
+    paths:
+      - tools/set-bc250-heap-limit.ps1
+      - tools/test-bc250-heap-limit.ps1
+      - docs/SMALL-DESCRIPTOR-HEAPS.md
+      - .github/workflows/bc250-heap-limit.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify registry apply and rollback in Windows PowerShell 5.1
+        shell: powershell
+        run: .\tools\test-bc250-heap-limit.ps1
+      - name: Prepare package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory package | Out-Null
+          Copy-Item tools\set-bc250-heap-limit.ps1 package\
+          Copy-Item docs\SMALL-DESCRIPTOR-HEAPS.md package\README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BC250-small-heaps-test
+          path: package/*
+          if-no-files-found: error
